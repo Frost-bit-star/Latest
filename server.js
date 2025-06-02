@@ -2,9 +2,9 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const { execSync } = require('child_process');
+const sqlite3 = require('sqlite3').verbose();
 
 const app = express();
 app.use(express.json());
@@ -84,75 +84,126 @@ db.serialize(() => {
 const centralBusinessNumber = '255776822641'; // Your business number
 const sessionPath = path.join(LOCAL_REPO_PATH, 'session');
 
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: sessionPath }),
-  puppeteer: { headless: true, args: ['--no-sandbox'] }
-});
+// Check if session folder exists with leveldb data
+function sessionExists() {
+  const leveldbPath = path.join(sessionPath, 'Default', 'Local Storage', 'leveldb');
+  return fs.existsSync(leveldbPath);
+}
 
-client.initialize().then(async () => {
-  if (!fs.existsSync(path.join(sessionPath, 'Default', 'Local Storage', 'leveldb'))) {
-    const code = await client.requestPairingCode(centralBusinessNumber);
-    console.log(`🔗 Pairing code: ${code}`);
+// Delete session folder if missing or expired to force fresh pairing
+function cleanSessionIfInvalid() {
+  if (!sessionExists()) {
+    console.log('❗ Session missing or expired, clearing session data...');
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
+      console.log('🧹 Old session data deleted.');
+    }
   }
-});
+}
 
-client.on('ready', () => {
-  console.log('✅ Bot ready!');
-  db.run(`INSERT OR REPLACE INTO settings (key, value) VALUES ('centralNumber', ?)`, [centralBusinessNumber]);
-  pushToGitHub("✅ Bot ready & paired");
-});
+// Main client variable (will hold current client instance)
+let client;
 
-client.on('disconnected', () => {
-  console.warn('⚠️ Disconnected! Attempting reconnect...');
-  setTimeout(() => client.initialize(), 5000);
-});
+async function startClient() {
+  cleanSessionIfInvalid();
 
-// === Message Handler ===
-client.on('message', async msg => {
-  const sender = msg.from.split('@')[0];
-  const text = msg.body.trim().toLowerCase();
+  client = new Client({
+    authStrategy: new LocalAuth({ dataPath: sessionPath }),
+    puppeteer: { headless: true, args: ['--no-sandbox'] }
+  });
 
-  // === Allow New User ===
-  if (text.includes("allow me")) {
-    const apiKey = generate8DigitCode();
-    db.run(`INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)`, [sender, apiKey], async err => {
-      if (!err) {
-        await client.sendMessage(msg.from,
-          `✅ You're activated!\n\n🔑 API Key: *${apiKey}*\nUse at:\nhttps://trover.42web.io/devs.php`
-        );
-        pushToGitHub(`✅ User ${sender} registered`);
-      }
-    });
-    return;
+  client.on('ready', () => {
+    console.log('✅ Bot ready and paired!');
+    db.run(`INSERT OR REPLACE INTO settings (key, value) VALUES ('centralNumber', ?)`, [centralBusinessNumber]);
+    pushToGitHub("✅ Bot ready & paired");
+  });
+
+  client.on('disconnected', async () => {
+    console.warn('⚠️ Disconnected! Re-initializing...');
+    try {
+      await client.destroy();
+    } catch (e) {
+      console.error("❌ Error destroying client:", e.message);
+    }
+    // Delay before restart to avoid rapid loops
+    setTimeout(() => startClient(), 5000);
+  });
+
+  client.on('auth_failure', async () => {
+    console.warn('❌ Auth failure detected. Requesting pairing code...');
+    try {
+      const code = await client.requestPairingCode(centralBusinessNumber);
+      console.log(`🔗 Pairing code: ${code}`);
+    } catch (e) {
+      console.error('❌ Failed to get pairing code:', e);
+    }
+  });
+
+  client.on('message', async msg => {
+    const sender = msg.from.split('@')[0];
+    const text = msg.body.trim().toLowerCase();
+
+    // Allow new user registration
+    if (text.includes("allow me")) {
+      const apiKey = generate8DigitCode();
+      db.run(`INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)`, [sender, apiKey], async err => {
+        if (!err) {
+          await client.sendMessage(msg.from,
+            `✅ You're activated!\n\n🔑 API Key: *${apiKey}*\nUse at:\nhttps://trover.42web.io/devs.php`
+          );
+          pushToGitHub(`✅ User ${sender} registered`);
+        } else {
+          await client.sendMessage(msg.from, '⚠️ Registration error, please try again later.');
+        }
+      });
+      return;
+    }
+
+    // Recover API Key
+    if (text.includes("recover apikey")) {
+      pullFromGitHub();
+      db.get(`SELECT apiKey FROM users WHERE number = ?`, [sender], async (err, row) => {
+        if (row) {
+          await client.sendMessage(msg.from, `🔐 Your API Key: *${row.apiKey}*`);
+        } else {
+          await client.sendMessage(msg.from, `⚠️ No API key found. Send *allow me*.`);
+        }
+      });
+      return;
+    }
+
+    // AI fallback reply
+    try {
+      const aiRes = await axios.post(
+        'https://troverstarapiai.vercel.app/api/chat',
+        { messages: [{ role: "user", content: msg.body }], model: "gpt-3.5-turbo" },
+        { headers: { "Content-Type": "application/json" } }
+      );
+      const reply = aiRes.data?.response?.content || "🤖 I didn't understand that.";
+      await client.sendMessage(msg.from, reply);
+    } catch (e) {
+      console.error("AI error:", e.message);
+      await client.sendMessage(msg.from, "❌ AI unavailable. Try later.");
+    }
+  });
+
+  await client.initialize();
+
+  // If session missing at startup, request pairing code immediately
+  if (!sessionExists()) {
+    try {
+      const code = await client.requestPairingCode(centralBusinessNumber);
+      console.log(`🔗 Pairing code at startup: ${code}`);
+    } catch (e) {
+      console.error('❌ Failed to get startup pairing code:', e);
+    }
   }
 
-  // === Recover API Key ===
-  if (text.includes("recover apikey")) {
-    pullFromGitHub();
-    db.get(`SELECT apiKey FROM users WHERE number = ?`, [sender], async (err, row) => {
-      if (row) {
-        await client.sendMessage(msg.from, `🔐 Your API Key: *${row.apiKey}*`);
-      } else {
-        await client.sendMessage(msg.from, `⚠️ No API key found. Send *allow me*.`);
-      }
-    });
-    return;
-  }
+  return client;
+}
 
-  // === AI Fallback ===
-  try {
-    const aiRes = await axios.post(
-      'https://troverstarapiai.vercel.app/api/chat',
-      { messages: [{ role: "user", content: msg.body }], model: "gpt-3.5-turbo" },
-      { headers: { "Content-Type": "application/json" } }
-    );
-    const reply = aiRes.data?.response?.content || "🤖 I didn't understand that.";
-    await client.sendMessage(msg.from, reply);
-  } catch (e) {
-    console.error("AI error:", e.message);
-    await client.sendMessage(msg.from, "❌ AI unavailable. Try later.");
-  }
-});
+// Start the WhatsApp client
+startClient();
 
 // === HTTP API ===
 app.post('/api/send', async (req, res) => {
@@ -178,10 +229,10 @@ app.post('/api/send', async (req, res) => {
   });
 });
 
-// === Server Start ===
-app.listen(3000, () => console.log('🚀 Server live on port 3000'));
-
 // === Helper ===
 function generate8DigitCode() {
   return Math.floor(10000000 + Math.random() * 90000000).toString();
 }
+
+// === Start HTTP Server ===
+app.listen(3000, () => console.log('🚀 Server live on port 3000'));
