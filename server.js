@@ -9,268 +9,158 @@ const { execSync } = require('child_process');
 const app = express();
 app.use(express.json());
 
-// === GitHub Setup ===
+// === GitHub Repo Sync ===
 const GITHUB_REPO = 'https://github.com/Frost-bit-star/Config.git';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
 
-function runGitCommand(cmd, cwd = LOCAL_REPO_PATH) {
+function runGit(cmd, cwd = LOCAL_REPO_PATH) {
   try {
     execSync(cmd, { cwd, stdio: 'inherit' });
   } catch (err) {
-    console.error("❌ Git command failed:", err.message);
+    console.error("❌ Git failed:", err.message);
   }
 }
 
-function setupGitIdentity() {
-  runGitCommand('git config user.name "Frostbit Star"');
-  runGitCommand('git config user.email "morganmilstone983@gmail.com"'); // Replace with your GitHub email
+function setupGit() {
+  runGit('git config user.name "Frostbit Star"');
+  runGit('git config user.email "morganmilstone983@gmail.com"');
 }
 
-function ensureMainBranchExists() {
-  try {
-    const headPath = path.join(LOCAL_REPO_PATH, '.git', 'HEAD');
-    const headContent = fs.readFileSync(headPath, 'utf-8');
-    if (!headContent.includes('refs/heads/main')) {
-      runGitCommand('git checkout -b main');
-    }
-  } catch (err) {
-    console.error('❌ Failed to check/create main branch:', err.message);
+function ensureMainBranch() {
+  const head = path.join(LOCAL_REPO_PATH, '.git', 'HEAD');
+  if (fs.existsSync(head) && !fs.readFileSync(head, 'utf-8').includes('refs/heads/main')) {
+    runGit('git checkout -b main');
   }
 }
 
-function cloneRepoIfNotExists() {
+function cloneRepo() {
   if (!fs.existsSync(LOCAL_REPO_PATH)) {
-    const tokenizedUrl = GITHUB_REPO.replace('https://', `https://${GITHUB_TOKEN}@`);
-    execSync(`git clone ${tokenizedUrl} repo-data`, { cwd: __dirname, stdio: 'inherit' });
+    const tokenUrl = GITHUB_REPO.replace('https://', `https://${GITHUB_TOKEN}@`);
+    execSync(`git clone ${tokenUrl} repo-data`, { cwd: __dirname, stdio: 'inherit' });
   }
 }
 
-function pullLatestFromGitHub() {
-  runGitCommand('git pull');
+function pullFromGitHub() {
+  runGit('git pull');
 }
 
-function commitAndPushChanges(msg = 'Update bot data') {
-  setupGitIdentity();
-  ensureMainBranchExists();
+function pushToGitHub(msg = 'Update bot data') {
+  setupGit();
+  ensureMainBranch();
+  runGit('git add .');
   try {
-    runGitCommand('git add .');
     execSync(`git diff --cached --quiet || git commit -m "${msg}"`, { cwd: LOCAL_REPO_PATH });
-    runGitCommand('git push -u origin main');
+    runGit('git push -u origin main');
   } catch (err) {
-    console.error('❌ Commit/Push Error:', err.message);
+    console.error("❌ Push error:", err.message);
   }
 }
 
-// === Clone repo and pull latest on start ===
-cloneRepoIfNotExists();
-pullLatestFromGitHub();
+// === Init Git Repo and Pull Data ===
+cloneRepo();
+pullFromGitHub();
 
-// === Initialize SQLite DB from repo ===
+// === SQLite Init ===
 const dbPath = path.join(LOCAL_REPO_PATH, 'botdata.db');
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) console.error("❌ Failed to connect to database", err);
-  else console.log("✅ SQLite database connected");
+const db = new sqlite3.Database(dbPath, err => {
+  if (err) console.error("❌ DB connect error:", err);
+  else console.log("✅ DB connected");
 });
 
-// === Create tables if not exist ===
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     number TEXT UNIQUE,
     apiKey TEXT
   )`);
-
   db.run(`CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
   )`);
 });
 
-// === Business Number ===
-const HARDCODED_BUSINESS_NUMBER = '255776822641';
-let centralBusinessNumber = HARDCODED_BUSINESS_NUMBER;
+// === WhatsApp Setup ===
+const centralBusinessNumber = '255776822641'; // Your business number
+const sessionPath = path.join(LOCAL_REPO_PATH, 'session');
 
-// === WhatsApp Client ===
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: path.join(LOCAL_REPO_PATH, 'session') }),
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox']
-  }
+  authStrategy: new LocalAuth({ dataPath: sessionPath }),
+  puppeteer: { headless: true, args: ['--no-sandbox'] }
 });
 
-// Auto reconnect logic
-let reconnectAttempts = 0;
-const MAX_RECONNECT_DELAY = 30000; // 30 seconds max
-
-async function reconnectClient() {
-  reconnectAttempts++;
-  const delay = Math.min(1000 * reconnectAttempts, MAX_RECONNECT_DELAY);
-  console.log(`🔄 Attempting to reconnect in ${delay / 1000}s (Attempt ${reconnectAttempts})`);
-
-  setTimeout(async () => {
-    try {
-      await client.initialize();
-      console.log('✅ Reconnected to WhatsApp!');
-      reconnectAttempts = 0;
-    } catch (err) {
-      console.error('❌ Reconnect failed:', err.message);
-      reconnectClient();
-    }
-  }, delay);
-}
-
-function registerHardcodedNumber() {
-  db.run(
-    `INSERT OR REPLACE INTO settings (key, value) VALUES ('centralNumber', ?)`,
-    [centralBusinessNumber],
-    (err) => {
-      if (err) console.error('❌ DB Save Error:', err);
-      else {
-        console.log(`✅ Business number registered: ${centralBusinessNumber}`);
-        commitAndPushChanges('✅ Session paired and business number registered');
-      }
-    }
-  );
-}
-
-// === Pairing code request helper ===
-async function tryPairing() {
-  try {
-    const code = await client.requestPairingCode(centralBusinessNumber);
-    console.log(`🔗 Pairing code (8-digit): ${code}`);
-  } catch (err) {
-    console.error('❌ Failed to generate pairing code:', err);
-  }
-}
-
-// Check if session exists
-const sessionExists = fs.existsSync(path.join(LOCAL_REPO_PATH, 'session/Default/Local Storage/leveldb'));
-
-// Initialize client
 client.initialize().then(async () => {
-  if (!sessionExists) await tryPairing();
-});
-
-// Events
-client.on('ready', () => {
-  console.log('✅ WhatsApp bot is ready and online!');
-  registerHardcodedNumber();
-});
-
-client.on('authenticated', () => {
-  console.log('🔐 Authenticated with WhatsApp');
-});
-
-client.on('auth_failure', async msg => {
-  console.error('❌ Authentication failed:', msg);
-  await tryPairing();
-  reconnectClient();
-});
-
-client.on('disconnected', async reason => {
-  console.log('⚠️ WhatsApp disconnected:', reason);
-  if (reason && reason.toLowerCase().includes('authentication')) {
-    await tryPairing();
+  if (!fs.existsSync(path.join(sessionPath, 'Default', 'Local Storage', 'leveldb'))) {
+    const code = await client.requestPairingCode(centralBusinessNumber);
+    console.log(`🔗 Pairing code: ${code}`);
   }
-  reconnectClient();
 });
 
-// === Message Handling ===
+client.on('ready', () => {
+  console.log('✅ Bot ready!');
+  db.run(`INSERT OR REPLACE INTO settings (key, value) VALUES ('centralNumber', ?)`, [centralBusinessNumber]);
+  pushToGitHub("✅ Bot ready & paired");
+});
+
+client.on('disconnected', () => {
+  console.warn('⚠️ Disconnected! Attempting reconnect...');
+  setTimeout(() => client.initialize(), 5000);
+});
+
+// === Message Handler ===
 client.on('message', async msg => {
-  const senderNumber = msg.from.split('@')[0];
+  const sender = msg.from.split('@')[0];
   const text = msg.body.trim().toLowerCase();
 
-  if (!centralBusinessNumber) {
-    return await client.sendMessage(msg.from, `🚫 Bot is not activated.`);
-  }
-
-  if (msg.to !== `${centralBusinessNumber}@c.us` && senderNumber !== centralBusinessNumber) {
-    return await client.sendMessage(msg.from, `🚫 You can only communicate with the business number.`);
-  }
-
+  // === Allow New User ===
   if (text.includes("allow me")) {
     const apiKey = generate8DigitCode();
-    db.run(
-      `INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)`,
-      [senderNumber, apiKey],
-      async err => {
-        if (!err) {
-          await client.sendMessage(msg.from,
-            `✅ You're activated!\n\n🔑 API Key: *${apiKey}*\n\nUse it at:\nhttps://trover.42web.io/devs.php`
-          );
-          commitAndPushChanges(`✅ User ${senderNumber} registered`);
-        } else {
-          console.error('DB Insert Error:', err);
-        }
+    db.run(`INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)`, [sender, apiKey], async err => {
+      if (!err) {
+        await client.sendMessage(msg.from,
+          `✅ You're activated!\n\n🔑 API Key: *${apiKey}*\nUse at:\nhttps://trover.42web.io/devs.php`
+        );
+        pushToGitHub(`✅ User ${sender} registered`);
       }
-    );
+    });
     return;
   }
 
+  // === Recover API Key ===
   if (text.includes("recover apikey")) {
-    pullLatestFromGitHub();
-    db.get(
-      `SELECT apiKey FROM users WHERE number = ?`,
-      [senderNumber],
-      async (err, row) => {
-        if (err) {
-          console.error('DB Fetch Error:', err);
-          return await client.sendMessage(msg.from, "❌ Error accessing your data.");
-        }
-
-        if (row) {
-          await client.sendMessage(msg.from, `🔐 Your existing API Key: *${row.apiKey}*`);
-        } else {
-          await client.sendMessage(msg.from, `⚠️ No API key found. Send *allow me* to get one.`);
-        }
+    pullFromGitHub();
+    db.get(`SELECT apiKey FROM users WHERE number = ?`, [sender], async (err, row) => {
+      if (row) {
+        await client.sendMessage(msg.from, `🔐 Your API Key: *${row.apiKey}*`);
+      } else {
+        await client.sendMessage(msg.from, `⚠️ No API key found. Send *allow me*.`);
       }
-    );
+    });
     return;
   }
 
   // === AI Fallback ===
   try {
-    const aiResponse = await axios.post(
+    const aiRes = await axios.post(
       'https://troverstarapiai.vercel.app/api/chat',
-      {
-        messages: [{ role: "user", content: msg.body }],
-        model: "gpt-3.5-turbo"
-      },
+      { messages: [{ role: "user", content: msg.body }], model: "gpt-3.5-turbo" },
       { headers: { "Content-Type": "application/json" } }
     );
-
-    const aiReply = aiResponse.data?.response?.content || "🤖 Sorry, I couldn't understand that.";
-    await client.sendMessage(msg.from, aiReply);
-  } catch (error) {
-    console.error("AI Request Failed:", error.message);
-    await client.sendMessage(msg.from, "❌ AI service unavailable. Try again later.");
+    const reply = aiRes.data?.response?.content || "🤖 I didn't understand that.";
+    await client.sendMessage(msg.from, reply);
+  } catch (e) {
+    console.error("AI error:", e.message);
+    await client.sendMessage(msg.from, "❌ AI unavailable. Try later.");
   }
 });
 
 // === HTTP API ===
 app.post('/api/send', async (req, res) => {
   const { apikey, message, mediaUrl, caption } = req.body;
-
-  if (!centralBusinessNumber) {
-    return res.status(500).send("Bot is not linked to a business number.");
-  }
-
-  if (!apikey || (!message && !mediaUrl)) {
-    return res.status(400).send("Missing API key or message/mediaUrl");
-  }
+  if (!apikey || (!message && !mediaUrl)) return res.status(400).send("Missing input");
 
   db.get(`SELECT number FROM users WHERE apiKey = ?`, [apikey], async (err, row) => {
-    if (err) {
-      console.error('DB Select Error:', err);
-      return res.status(500).send("Database error");
-    }
-
-    if (!row) {
-      return res.status(401).send("Invalid API key");
-    }
-
+    if (!row) return res.status(401).send("Invalid API key");
     const chatId = `${row.number}@c.us`;
 
     try {
@@ -280,20 +170,18 @@ app.post('/api/send', async (req, res) => {
       } else {
         await client.sendMessage(chatId, message);
       }
-
-      res.send("✅ Message sent from business number");
+      res.send("✅ Message sent");
     } catch (e) {
-      console.error('Send Error:', e);
-      res.status(500).send("❌ Failed to send message");
+      console.error("Send error:", e.message);
+      res.status(500).send("❌ Send failed");
     }
   });
 });
 
-app.listen(3000, () => {
-  console.log('🚀 Server running on port 3000');
-});
+// === Server Start ===
+app.listen(3000, () => console.log('🚀 Server live on port 3000'));
 
-// === Generate Random Code ===
+// === Helper ===
 function generate8DigitCode() {
   return Math.floor(10000000 + Math.random() * 90000000).toString();
 }
