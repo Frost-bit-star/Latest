@@ -1,0 +1,53 @@
+name: Build WhatsApp Bot
+
+on:
+  push:
+    branches:
+      - main  # Update if your default branch is different
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: 📂 Create session directory
+        run: |
+          mkdir -p ./session
+          chmod -R 777 ./session  # Ensures write permissions
+
+      - name: 📦 Install Dependencies
+        run: |
+          npm install
+
+      # Optional: Install Puppeteer dependencies (only if needed)
+      - name: 🧩 Install Puppeteer Dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y \
+            wget \
+            ca-certificates \
+            fonts-liberation \
+            libappindicator3-1 \
+            libasound2 \
+            libatk-bridge2.0-0 \
+            libatk1.0-0 \
+            libcups2 \
+            libdbus-1-3 \
+            libgdk-pixbuf2.0-0 \
+            libnspr4 \
+            libnss3 \
+            libx11-xcb1 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxrandr2 \
+            xdg-utils
+
+      - name: ✅ Confirm Build Ready
+        run: echo "🚀 WhatsApp Bot is ready to deploy."
