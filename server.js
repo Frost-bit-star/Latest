@@ -100,6 +100,27 @@ const client = new Client({
   }
 });
 
+// Auto reconnect logic
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 30000; // 30 seconds max
+
+async function reconnectClient() {
+  reconnectAttempts++;
+  const delay = Math.min(1000 * reconnectAttempts, MAX_RECONNECT_DELAY);
+  console.log(`🔄 Attempting to reconnect in ${delay / 1000}s (Attempt ${reconnectAttempts})`);
+
+  setTimeout(async () => {
+    try {
+      await client.initialize();
+      console.log('✅ Reconnected to WhatsApp!');
+      reconnectAttempts = 0;
+    } catch (err) {
+      console.error('❌ Reconnect failed:', err.message);
+      reconnectClient();
+    }
+  }, delay);
+}
+
 function registerHardcodedNumber() {
   db.run(
     `INSERT OR REPLACE INTO settings (key, value) VALUES ('centralNumber', ?)`,
@@ -114,20 +135,25 @@ function registerHardcodedNumber() {
   );
 }
 
+// === Pairing code request helper ===
+async function tryPairing() {
+  try {
+    const code = await client.requestPairingCode(centralBusinessNumber);
+    console.log(`🔗 Pairing code (8-digit): ${code}`);
+  } catch (err) {
+    console.error('❌ Failed to generate pairing code:', err);
+  }
+}
+
 // Check if session exists
 const sessionExists = fs.existsSync(path.join(LOCAL_REPO_PATH, 'session/Default/Local Storage/leveldb'));
 
+// Initialize client
 client.initialize().then(async () => {
-  if (!sessionExists) {
-    try {
-      const code = await client.requestPairingCode(centralBusinessNumber);
-      console.log(`🔗 Pairing code (8-digit): ${code}`);
-    } catch (err) {
-      console.error('❌ Failed to generate pairing code:', err);
-    }
-  }
+  if (!sessionExists) await tryPairing();
 });
 
+// Events
 client.on('ready', () => {
   console.log('✅ WhatsApp bot is ready and online!');
   registerHardcodedNumber();
@@ -137,12 +163,18 @@ client.on('authenticated', () => {
   console.log('🔐 Authenticated with WhatsApp');
 });
 
-client.on('auth_failure', msg => {
+client.on('auth_failure', async msg => {
   console.error('❌ Authentication failed:', msg);
+  await tryPairing();
+  reconnectClient();
 });
 
-client.on('disconnected', reason => {
+client.on('disconnected', async reason => {
   console.log('⚠️ WhatsApp disconnected:', reason);
+  if (reason && reason.toLowerCase().includes('authentication')) {
+    await tryPairing();
+  }
+  reconnectClient();
 });
 
 // === Message Handling ===
