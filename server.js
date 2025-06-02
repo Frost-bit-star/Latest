@@ -236,3 +236,9 @@ function generate8DigitCode() {
 
 // === Start HTTP Server ===
 app.listen(3000, () => console.log('🚀 Server live on port 3000'));
+
+// === GitHub Sync Interval ===
+setInterval(() => {
+  pullFromGitHub();
+  pushToGitHub("Periodic update from server");
+}, 120000); // 2 minutes
