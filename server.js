@@ -116,6 +116,7 @@ async function startClient() {
     console.log('✅ Bot ready and paired!');
     db.run(`INSERT OR REPLACE INTO settings (key, value) VALUES ('centralNumber', ?)`, [centralBusinessNumber]);
     pushToGitHub("✅ Bot ready & paired");
+    client.sendMessage(centralBusinessNumber, "🤖 Bot is online!"); // Notify that bot is online
   });
 
   client.on('disconnected', async () => {
@@ -169,6 +170,14 @@ async function startClient() {
           await client.sendMessage(msg.from, `⚠️ No API key found. Send *allow me*.`);
         }
       });
+      return;
+    }
+
+    // Check bot status
+    if (text === ".ping") {
+      const status = sessionExists() ? "online" : "offline";
+      const response = status === "offline" ? `⚠️ Bot is offline. New pairing code: ${await client.requestPairingCode(centralBusinessNumber)}` : "✅ Bot is online!";
+      await client.sendMessage(msg.from, response);
       return;
     }
 
