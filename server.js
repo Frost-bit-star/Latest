@@ -22,6 +22,23 @@ function runGitCommand(cmd, cwd = LOCAL_REPO_PATH) {
   }
 }
 
+function setupGitIdentity() {
+  runGitCommand('git config user.name "Frostbit Star"');
+  runGitCommand('git config user.email "morganmilstone983@gmail.com"'); // Replace with your GitHub email
+}
+
+function ensureMainBranchExists() {
+  try {
+    const headPath = path.join(LOCAL_REPO_PATH, '.git', 'HEAD');
+    const headContent = fs.readFileSync(headPath, 'utf-8');
+    if (!headContent.includes('refs/heads/main')) {
+      runGitCommand('git checkout -b main');
+    }
+  } catch (err) {
+    console.error('❌ Failed to check/create main branch:', err.message);
+  }
+}
+
 function cloneRepoIfNotExists() {
   if (!fs.existsSync(LOCAL_REPO_PATH)) {
     const tokenizedUrl = GITHUB_REPO.replace('https://', `https://${GITHUB_TOKEN}@`);
@@ -34,9 +51,15 @@ function pullLatestFromGitHub() {
 }
 
 function commitAndPushChanges(msg = 'Update bot data') {
-  runGitCommand('git add .');
-  runGitCommand(`git commit -m "${msg}" || echo "Nothing to commit"`);
-  runGitCommand('git push');
+  setupGitIdentity();
+  ensureMainBranchExists();
+  try {
+    runGitCommand('git add .');
+    execSync(`git diff --cached --quiet || git commit -m "${msg}"`, { cwd: LOCAL_REPO_PATH });
+    runGitCommand('git push -u origin main');
+  } catch (err) {
+    console.error('❌ Commit/Push Error:', err.message);
+  }
 }
 
 // === Clone repo and pull latest on start ===
