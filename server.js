@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
 const express = require("express");
+const crypto = require("crypto"); // ✅ Fix: added missing crypto module
 
 const app = express();
 app.use(express.json());
@@ -15,10 +16,16 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const SESSION_PATH = path.join(__dirname, "auth_info");
 
-const BUSINESS_NUMBER = "255776822641@s.whatsapp.net"; // Your business number
+const BUSINESS_NUMBER = "255776822641@s.whatsapp.net";
 const AI_ENDPOINT = "https://troverstarapiai.vercel.app/api/chat";
 
-// === Session Handling ===
+// === Optional: Base64-encoded session data (if any) ===
+const SESSION_DATA = null;
+
+let sock;
+let ready = false;
+
+// === Restore session if provided ===
 function restoreSessionFromHardcodedEnv(sessionBase64) {
   if (!sessionBase64) return;
   if (!fs.existsSync(SESSION_PATH)) {
@@ -31,16 +38,11 @@ function restoreSessionFromHardcodedEnv(sessionBase64) {
   }
 }
 
-const SESSION_DATA = null; // ✅ Optional: base64 session if restoring
-
-let sock;
-let ready = false;
-
 async function startBot() {
   restoreSessionFromHardcodedEnv(SESSION_DATA);
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-  const { version } = await fetchLatestBaileysVersion(); // ✅ Correct function
+  const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
     version,
@@ -113,6 +115,7 @@ async function startBot() {
     }
   });
 
+  // 🔗 Pairing code for new device
   if (!fs.existsSync(path.join(SESSION_PATH, "creds.json"))) {
     try {
       const code = await sock.requestPairingCode(BUSINESS_NUMBER.split("@")[0]);
@@ -125,7 +128,7 @@ async function startBot() {
 
 startBot();
 
-// === API Endpoints ===
+// === Public API to send messages ===
 app.post("/api/send", async (req, res) => {
   const { number, message } = req.body;
   if (!number || !message) return res.status(400).send("Missing number/message");
@@ -139,6 +142,7 @@ app.post("/api/send", async (req, res) => {
   }
 });
 
+// === Health check for AI + WhatsApp connection ===
 app.get("/api/health", async (req, res) => {
   let aiWorks = false;
 
@@ -158,7 +162,7 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-// === Self-ping every 60s for Render keep-alive ===
+// === Railway keep-alive ===
 setInterval(() => {
   axios.get(`http://localhost:${PORT}/api/health`).catch(() => {});
 }, 60000);
