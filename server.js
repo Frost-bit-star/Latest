@@ -2,7 +2,7 @@ const {
   makeWASocket,
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
-  fetchLatestBaileysVersionOrDie
+  fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 const fs = require("fs");
 const path = require("path");
@@ -15,8 +15,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const SESSION_PATH = path.join(__dirname, "auth_info");
 
-// ✅ Hardcoded Config
-const BUSINESS_NUMBER = "255776822641@s.whatsapp.net"; // Replace with your number
+const BUSINESS_NUMBER = "255776822641@s.whatsapp.net"; // Your business number
 const AI_ENDPOINT = "https://troverstarapiai.vercel.app/api/chat";
 
 // === Session Handling ===
@@ -32,7 +31,7 @@ function restoreSessionFromHardcodedEnv(sessionBase64) {
   }
 }
 
-const SESSION_DATA = null; // ⚠️ Optional: Paste base64 session here if you want persistent auto-login
+const SESSION_DATA = null; // ✅ Optional: base64 session if restoring
 
 let sock;
 let ready = false;
@@ -41,7 +40,7 @@ async function startBot() {
   restoreSessionFromHardcodedEnv(SESSION_DATA);
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-  const { version } = await fetchLatestBaileysVersionOrDie();
+  const { version } = await fetchLatestBaileysVersion(); // ✅ Correct function
 
   sock = makeWASocket({
     version,
@@ -59,7 +58,6 @@ async function startBot() {
       ready = true;
       console.log("✅ Bot is connected");
 
-      // On first-time pairing, send session to business number
       if (!SESSION_DATA && isNewLogin) {
         const sessionObj = {};
         const files = fs.readdirSync(SESSION_PATH);
@@ -92,13 +90,11 @@ async function startBot() {
     const sender = msg.key.remoteJid;
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-    // Ping
     if (text.toLowerCase() === "ping") {
       await sock.sendMessage(sender, { text: "✅ I'm alive!" });
       return;
     }
 
-    // Fallback AI
     try {
       const aiRes = await axios.post(
         AI_ENDPOINT,
@@ -117,7 +113,6 @@ async function startBot() {
     }
   });
 
-  // If no session exists, request pairing code
   if (!fs.existsSync(path.join(SESSION_PATH, "creds.json"))) {
     try {
       const code = await sock.requestPairingCode(BUSINESS_NUMBER.split("@")[0]);
@@ -131,8 +126,6 @@ async function startBot() {
 startBot();
 
 // === API Endpoints ===
-
-// ✅ Send Message
 app.post("/api/send", async (req, res) => {
   const { number, message } = req.body;
   if (!number || !message) return res.status(400).send("Missing number/message");
@@ -146,7 +139,6 @@ app.post("/api/send", async (req, res) => {
   }
 });
 
-// ✅ Health Check
 app.get("/api/health", async (req, res) => {
   let aiWorks = false;
 
@@ -166,7 +158,7 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-// 🛡️ Self-ping every 60s
+// === Self-ping every 60s for Render keep-alive ===
 setInterval(() => {
   axios.get(`http://localhost:${PORT}/api/health`).catch(() => {});
 }, 60000);
