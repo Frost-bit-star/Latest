@@ -1,20 +1,16 @@
 {
-  "name": "whatsapp-bot",
+  "name": "whatsapp-pairing-bot",
   "version": "1.0.0",
-  "description": "WhatsApp bot with API key registration, messaging, GitHub backup, and future extensions",
+  "description": "WhatsApp bot using Baileys with pairing code, fallback AI, health checks, and message API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "author": "Your Name",
+  "author": "Frostbit Star",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.6.0",
-    "express": "^4.18.4",
-    "sqlite3": "^5.1.6",
-    "whatsapp-web.js": "^1.23.0",
-    "simple-git": "^3.16.0",
-    "qrcode-terminal": "^0.12.0",
-    "dotenv": "^16.3.1"
+    "@whiskeysockets/baileys": "^6.7.4",
+    "axios": "^1.6.8",
+    "express": "^4.18.4"
   }
 }
