@@ -2,189 +2,83 @@ const {
   makeWASocket,
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
-  fetchLatestBaileysVersion,
-  DisconnectReason
-} = require("@whiskeysockets/baileys");
-const fs = require("fs");
-const path = require("path");
-const axios = require("axios");
-const express = require("express");
-const crypto = require("crypto");
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
-const SESSION_PATH = path.join(__dirname, "auth_info");
+const SESSION_PATH = './storage/session';
+const PAIRING_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
-const BUSINESS_NUMBER = "255776822641@s.whatsapp.net";
-const AI_ENDPOINT = "https://troverstarapiai.vercel.app/api/chat";
+// Ensure session folder exists
+fs.mkdirSync(SESSION_PATH, { recursive: true });
 
-// Optional: restore session from base64 (optional)
-const SESSION_DATA = null;
+const startBot = async () => {
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
+  const { version } = await fetchLatestBaileysVersion();
 
-let sock;
-let ready = false;
-
-function restoreSessionFromHardcodedEnv(sessionBase64) {
-  if (!sessionBase64) return;
-  if (!fs.existsSync(SESSION_PATH)) {
-    fs.mkdirSync(SESSION_PATH, { recursive: true });
-    const parsed = JSON.parse(Buffer.from(sessionBase64, "base64").toString());
-    for (const [filename, data] of Object.entries(parsed)) {
-      fs.writeFileSync(path.join(SESSION_PATH, filename), JSON.stringify(data, null, 2));
-    }
-    console.log("✅ Session restored from hardcoded value");
-  }
-}
-
-async function startBot() {
-  try {
-    restoreSessionFromHardcodedEnv(SESSION_DATA);
-
-    const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-    const { version } = await fetchLatestBaileysVersion();
-
-    sock = makeWASocket({
-      version,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, fs)
-      },
-      printQRInTerminal: false
-    });
-
-    sock.ev.on("creds.update", saveCreds);
-
-    sock.ev.on("connection.update", async ({ connection, lastDisconnect, isNewLogin }) => {
-      if (connection === "open") {
-        ready = true;
-        console.log("✅ Bot is connected");
-
-        if (!SESSION_DATA && isNewLogin) {
-          const sessionObj = {};
-          const files = fs.readdirSync(SESSION_PATH);
-          for (const file of files) {
-            const content = fs.readFileSync(path.join(SESSION_PATH, file), "utf-8");
-            sessionObj[file] = JSON.parse(content);
-          }
-
-          const base64 = Buffer.from(JSON.stringify(sessionObj)).toString("base64");
-
-          await sock.sendMessage(BUSINESS_NUMBER, {
-            text: `✅ *Pairing Complete!*\n\nPaste this in your code:\n\nconst SESSION_DATA = "${base64}";`
-          });
-
-          console.log("📦 Session data sent to business number");
-        }
-      }
-
-      if (connection === "close") {
-        ready = false;
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-
-        if (shouldReconnect) {
-          console.warn("❌ Disconnected. Reconnecting...");
-          setTimeout(startBot, 5000);
-        } else {
-          console.error("❌ Logged out. Manual re-pairing required.");
-        }
-      }
-    });
-
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-      const msg = messages[0];
-      if (!msg.message || msg.key.fromMe) return;
-
-      const sender = msg.key.remoteJid;
-      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-
-      if (text.toLowerCase() === "ping") {
-        await sock.sendMessage(sender, { text: "✅ I'm alive!" });
-        return;
-      }
-
-      try {
-        const aiRes = await axios.post(
-          AI_ENDPOINT,
-          {
-            messages: [{ role: "user", content: text }],
-            model: "gpt-3.5-turbo"
-          },
-          { headers: { "Content-Type": "application/json" } }
-        );
-
-        const reply = aiRes.data?.response?.content || "🤖 I didn't understand.";
-        await sock.sendMessage(sender, { text: reply });
-      } catch (err) {
-        console.error("❌ AI error:", err.message);
-        await sock.sendMessage(sender, { text: "⚠️ AI service unavailable." });
-      }
-    });
-
-    // Request pairing code if session does not exist
-    if (!fs.existsSync(path.join(SESSION_PATH, "creds.json"))) {
-      try {
-        const code = await sock.requestPairingCode(BUSINESS_NUMBER.split("@")[0]);
-        console.log(`🔗 Pairing Code: ${code}`);
-      } catch (err) {
-        console.error("❌ Failed to get pairing code:", err.message);
-      }
-    }
-  } catch (err) {
-    console.error("❌ Error starting bot:", err.message);
-    setTimeout(startBot, 5000);
-  }
-}
-
-startBot();
-
-// === API to send messages ===
-app.post("/api/send", async (req, res) => {
-  const { number, message } = req.body;
-  if (!number || !message) return res.status(400).send("Missing number/message");
-
-  try {
-    await sock.sendMessage(`${number}@s.whatsapp.net`, { text: message });
-    res.send("✅ Message sent");
-  } catch (err) {
-    console.error("❌ Error sending:", err.message);
-    res.status(500).send("Send failed");
-  }
-});
-
-// === Health check ===
-app.get("/api/health", async (req, res) => {
-  let aiWorks = false;
-
-  try {
-    const ping = await axios.post(
-      AI_ENDPOINT,
-      { messages: [{ role: "user", content: "ping" }], model: "gpt-3.5-turbo" },
-      { headers: { "Content-Type": "application/json" } }
-    );
-    aiWorks = ping.status === 200;
-  } catch {}
-
-  res.json({
-    status: ready ? "✅ Bot Online" : "❌ Bot Offline",
-    ai: aiWorks ? "✅ AI Responding" : "❌ AI Down",
-    timestamp: new Date().toISOString()
+  const sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, fs)
+    },
+    printQRInTerminal: false,
+    generateHighQualityLinkPreview: true,
+    markOnlineOnConnect: false,
+    syncFullHistory: false,
+    browser: ['Ubuntu', 'Chrome', '22.04.4']
   });
+
+  let isPaired = !!state.creds.registered;
+  const timeout = setTimeout(() => {
+    if (!isPaired) {
+      console.log('❌ Pairing time expired. Restart the server to try again.');
+      process.exit(1);
+    }
+  }, PAIRING_TIMEOUT);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, isNewLogin, qr, pairingCode } = update;
+
+    if (pairingCode && !isPaired) {
+      console.log(`🔗 Pairing Code: ${pairingCode}`);
+      console.log('⌛ You have 5 minutes to pair this bot with your WhatsApp.');
+    }
+
+    if (connection === 'open') {
+      isPaired = true;
+      clearTimeout(timeout);
+      console.log('✅ Successfully connected to WhatsApp');
+    }
+
+    if (connection === 'close') {
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !== 401;
+      console.log('❌ Connection closed. Reason:', lastDisconnect?.error);
+      if (shouldReconnect) {
+        startBot(); // auto-reconnect
+      } else {
+        console.log('⚠️ Logged out. Re-pair required.');
+        process.exit(1);
+      }
+    }
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+};
+
+// Start Express + Bot
+app.get('/', (req, res) => {
+  res.send('✅ WhatsApp Bot Server is Live');
 });
 
-// === Railway keep-alive ===
-setInterval(() => {
-  axios.get(`http://localhost:${PORT}/api/health`).catch(() => {});
-}, 60000);
-
-// === Graceful shutdown ===
-process.on("SIGINT", async () => {
-  console.log("🔒 Shutting down...");
-  try {
-    await sock.logout();
-  } catch {}
-  process.exit(0);
+app.listen(PORT, () => {
+  console.log(`🚀 API Server running on port ${PORT}`);
+  startBot();
 });
-
-app.listen(PORT, () => console.log(`🚀 API Server running on port ${PORT}`));
