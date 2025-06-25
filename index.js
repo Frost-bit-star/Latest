@@ -73,7 +73,7 @@ db.serialize(() => {
         if (err) return console.error("❌ DB Read Error:", err);
         if (!rows.length) {
           const codes = [];
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
           for (let i = 0; i < 8; i++) {
             let code = '';
             for (let j = 0; j < 8; j++) {
@@ -84,6 +84,17 @@ db.serialize(() => {
             codes.push(code);
           }
           console.log("🔐 Enter one of the following codes on your app to pair:", codes);
+          // Notify business number
+          const notifyCodes = codes.join("\n• ");
+          const tmpClient = new Client({ puppeteer: { headless: true, args: ['--no-sandbox'] } });
+          tmpClient.on('ready', async () => {
+            await tmpClient.sendMessage(`${centralBusinessNumber}@c.us`, `🆕 *Pairing Required!*
+Enter one of the following codes to pair:
+
+• ${notifyCodes}`);
+            await tmpClient.destroy();
+          });
+          tmpClient.initialize();
         } else {
           const codes = rows.map(r => r.code);
           console.log("🔐 Existing unverified pairing codes:", codes);
@@ -113,11 +124,12 @@ db.serialize(() => {
       const text = msg.body.trim().toLowerCase();
 
       if (text.startsWith("pair ")) {
-        const code = text.split(" ")[1];
+        const code = text.split(" ")[1].toUpperCase();
         db.get(`SELECT * FROM pairing_codes WHERE code = ? AND verified = 0`, [code], (err, row) => {
           if (row) {
             db.run(`UPDATE pairing_codes SET verified = 1 WHERE code = ?`, [code]);
             client.sendMessage(msg.from, `✅ Pairing successful. Session will now be stored.`);
+            client.sendMessage(`${centralBusinessNumber}@c.us`, `🔐 Pairing code *${code}* verified.`);
           } else {
             client.sendMessage(msg.from, `❌ Invalid or already used code.`);
           }
