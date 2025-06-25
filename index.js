@@ -15,7 +15,7 @@ app.use(express.json());
 app.use(cors());
 
 const PORT = process.env.PORT || 3000;
-const GITHUB_REPO = 'https://github.com/Frost-bit-star/Config.git';
+const GITHUB_REPO = 'https://github.com/Frost-bit-star/Whatsapp-storage.git';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
 
