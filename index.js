@@ -75,14 +75,49 @@ const initDB = () => {
     code TEXT,
     created_at INTEGER
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT UNIQUE,
+    created_at INTEGER,
+    verified INTEGER DEFAULT 0
+  )`);
 };
 initDB();
+
+const pairingCodeLength = 8;
+function generatePairingCodes(count = 8) {
+  const codes = [];
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  for (let i = 0; i < count; i++) {
+    let code = '';
+    for (let j = 0; j < pairingCodeLength; j++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    const createdAt = Date.now();
+    db.run(`INSERT INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, createdAt]);
+    codes.push(code);
+  }
+  return codes;
+}
+
+function checkSessionExists() {
+  const sessionPath = path.join(__dirname, '.wwebjs_auth', 'session-main');
+  return fs.existsSync(sessionPath);
+}
+
+if (!checkSessionExists()) {
+  console.log("🆕 No WhatsApp session found. Generating manual pairing codes:");
+  const codes = generatePairingCodes();
+  console.log("🔐 Enter one of the following codes on your app to pair:", codes);
+} else {
+  console.log("🔁 Existing WhatsApp session detected. Skipping pairing code generation.");
+}
 
 const client = new Client({
   authStrategy: new LocalAuth({ clientId: 'main' }),
   puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
 });
-client.on('qr', qr => qrcode.generate(qr, { small: true }));
+
 client.on('ready', () => {
   console.log('✅ Bot is ready.');
   client.sendMessage(`${centralBusinessNumber}@c.us`, "🤖 Bot is online!");
@@ -95,6 +130,19 @@ client.on('disconnected', reason => console.warn(`⚠️ Disconnected: ${reason}
 client.on('message', async msg => {
   const sender = msg.from.split('@')[0];
   const text = msg.body.trim().toLowerCase();
+
+  if (text.startsWith("pair ")) {
+    const code = text.split(" ")[1];
+    db.get(`SELECT * FROM pairing_codes WHERE code = ? AND verified = 0`, [code], (err, row) => {
+      if (row) {
+        db.run(`UPDATE pairing_codes SET verified = 1 WHERE code = ?`, [code]);
+        client.sendMessage(msg.from, `✅ Pairing successful. Session will now be stored.`);
+      } else {
+        client.sendMessage(msg.from, `❌ Invalid or already used code.`);
+      }
+    });
+    return;
+  }
 
   if (text.includes("allow me")) {
     const apiKey = Math.floor(10000000 + Math.random() * 90000000).toString();
@@ -139,37 +187,7 @@ client.on('message', async msg => {
 
 client.initialize();
 
-// Cleanup expired OTPs every minute
-setInterval(() => {
-  const expiry = Date.now() - 5 * 60 * 1000;
-  db.run(`DELETE FROM verification_codes WHERE created_at < ?`, expiry);
-}, 60000);
-
-// Send message API
-app.post('/api/send', async (req, res) => {
-  const { apikey, message, mediaUrl, caption } = req.body;
-  if (!apikey || (!message && !mediaUrl)) return res.status(400).send("Missing input");
-
-  db.get(`SELECT number FROM users WHERE apiKey = ?`, [apikey], async (err, row) => {
-    if (!row) return res.status(401).send("Invalid API key");
-    const chatId = `${row.number}@c.us`;
-
-    try {
-      if (mediaUrl) {
-        const media = await MessageMedia.fromUrl(mediaUrl);
-        await client.sendMessage(chatId, media, { caption });
-      } else {
-        await client.sendMessage(chatId, message);
-      }
-      res.send("✅ Message sent");
-    } catch (e) {
-      console.error("Send error:", e.message);
-      res.status(500).send("❌ Send failed");
-    }
-  });
-});
-
-// Request OTP via WhatsApp
+// OTP endpoints
 app.post('/request-code', async (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ message: 'Phone number is required.' });
@@ -195,7 +213,6 @@ app.post('/request-code', async (req, res) => {
   );
 });
 
-// Verify OTP
 app.post('/verify-code', (req, res) => {
   const { phone, code } = req.body;
   const expiry = Date.now() - 5 * 60 * 1000;
@@ -213,22 +230,4 @@ app.post('/verify-code', (req, res) => {
   );
 });
 
-// Health Check
-app.get('/health', async (req, res) => {
-  const dbStatus = await new Promise(resolve => {
-    db.get('SELECT 1', [], err => resolve(err ? 'error' : 'ok'));
-  });
-  res.status(dbStatus === 'ok' ? 200 : 500).json({
-    status: dbStatus === 'ok' ? 'ok' : 'error',
-    components: { http: 'ok', database: dbStatus },
-    timestamp: new Date().toISOString()
-  });
-});
-
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-
-// Periodic Git sync
-setInterval(() => {
-  pullFromGitHub();
-  pushToGitHub("⏱ Periodic sync");
-}, 120000);
