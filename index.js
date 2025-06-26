@@ -1,30 +1,29 @@
 require('dotenv').config();
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const express = require('express');
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const { execSync } = require('child_process');
 const cors = require('cors');
 const crypto = require('crypto');
+const qrcode = require('qrcode');
+const { execSync } = require('child_process');
+const { Boom } = require('@hapi/boom');
+const makeWASocket = require('@whiskeysockets/baileys').default;
+const { useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 
 const app = express();
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const GITHUB_REPO = 'https://github.com/Frost-bit-star/Whatsapp-storage.git';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
-
 const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
+
+// Git functions
 function runGit(cmd, cwd = LOCAL_REPO_PATH) {
-  try {
-    execSync(cmd, { cwd, stdio: 'inherit' });
-  } catch (err) {
-    console.error("❌ Git failed:", err.message);
-  }
+  try { execSync(cmd, { cwd, stdio: 'inherit' }); } catch (err) { console.error("❌ Git failed:", err.message); }
 }
 function cloneRepo() {
   if (!fs.existsSync(LOCAL_REPO_PATH)) {
@@ -42,13 +41,9 @@ function pushToGitHub(msg = 'Update bot data') {
   try {
     execSync(`git diff --cached --quiet || git commit -m "${msg}"`, { cwd: LOCAL_REPO_PATH });
     runGit('git push');
-  } catch (err) {
-    console.error("❌ Git push error:", err.message);
-  }
+  } catch (err) { console.error("❌ Git push error:", err.message); }
 }
-function pullFromGitHub() {
-  runGit('git pull');
-}
+function pullFromGitHub() { runGit('git pull'); }
 
 cloneRepo();
 pullFromGitHub();
@@ -57,180 +52,137 @@ const db = new sqlite3.Database(dbPath, err => {
   if (err) console.error("❌ DB Error:", err);
   else console.log("✅ Database connected");
 });
-
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE, apiKey TEXT)`);
-  db.run(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`);
   db.run(`CREATE TABLE IF NOT EXISTS verification_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, code TEXT, created_at INTEGER)`);
-  db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE, created_at INTEGER, verified INTEGER DEFAULT 0)`);
-
-  const sessionPath = path.join(__dirname, '.wwebjs_auth');
-  const sessionExists = fs.existsSync(sessionPath) && fs.readdirSync(sessionPath).length > 0;
-
-  db.get(`SELECT * FROM pairing_codes WHERE verified = 1 ORDER BY created_at DESC LIMIT 1`, async (err, row) => {
-    if (!sessionExists && !row) {
-      db.all(`SELECT code FROM pairing_codes WHERE verified = 0`, async (err, rows) => {
-        if (err) return console.error("❌ DB Read Error:", err);
-
-        if (!rows.length) {
-          const codes = [];
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-          for (let i = 0; i < 3; i++) {
-            let code = '';
-            for (let j = 0; j < 8; j++) {
-              code += chars[Math.floor(Math.random() * chars.length)];
-            }
-            const createdAt = Date.now();
-            db.run(`INSERT INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, createdAt]);
-            codes.push(code);
-          }
-
-          const notifyCodes = codes.map(c => `• ${c}`).join("\n");
-
-          console.log("\n🔐 [PAIRING] No verified session found.");
-          console.log("🔑 New pairing codes generated:\n" + notifyCodes);
-          console.log("📱 Enter one of these codes via WhatsApp to complete pairing.");
-
-          const tmpClient = new Client({ puppeteer: { headless: true, args: ['--no-sandbox'] } });
-          tmpClient.on('ready', async () => {
-            await tmpClient.sendMessage(`${centralBusinessNumber}@c.us`, `🆕 *Manual Pairing Required*\nUse one of the following codes:\n\n${notifyCodes}`);
-            await tmpClient.destroy();
-          });
-          tmpClient.initialize();
-        } else {
-          const notifyCodes = rows.map(r => `• ${r.code}`).join("\n");
-          console.log("\n🔐 [PAIRING] Unverified codes already exist:\n" + notifyCodes);
-          console.log("📱 Enter one of these codes via WhatsApp to complete pairing.");
-        }
-
-        console.log("🕓 Waiting for manual pairing...");
-      });
-    } else {
-      startMainBot();
-    }
-  });
+  db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (code TEXT PRIMARY KEY, created_at INTEGER, verified INTEGER DEFAULT 0)`);
 });
 
-function startMainBot() {
-  const client = new Client({
-    authStrategy: new LocalAuth({ clientId: 'main' }),
-    puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+let qrData = null;
+const pairingCodes = [];
+
+app.get('/qr', async (req, res) => {
+  if (!qrData) return res.status(503).json({ message: 'QR not ready yet' });
+  const url = await qrcode.toDataURL(qrData);
+  res.send(`<img src='${url}' alt='QR Code'/><p>or enter code: ${pairingCodes.join(', ')}</p>`);
+});
+
+async function generatePairingCodes() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  for (let i = 0; i < 3; i++) {
+    let code = '';
+    for (let j = 0; j < 8; j++) code += chars[Math.floor(Math.random() * chars.length)];
+    const createdAt = Date.now();
+    db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, createdAt]);
+    pairingCodes.push(code);
+  }
+}
+
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, fs),
+    },
+    printQRInTerminal: false,
+    generateHighQualityLinkPreview: true,
   });
 
-  client.on('ready', () => {
-    console.log('✅ Bot is ready.');
-    client.sendMessage(`${centralBusinessNumber}@c.us`, "🤖 Bot is online!");
-    db.run(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`, ['centralNumber', centralBusinessNumber]);
-    pushToGitHub('✅ Bot ready & paired');
+  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, qr, lastDisconnect } = update;
+
+    if (qr) {
+      qrData = qr;
+      pairingCodes.length = 0;
+      await generatePairingCodes();
+      console.log("🔐 Scan QR or enter one of these codes:", pairingCodes.join(', '));
+    }
+
+    if (connection === 'open') {
+      console.log('✅ Connected');
+      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is now online!' });
+      pushToGitHub('🤖 Bot connected');
+    }
+
+    if (connection === 'close') {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      if (reason !== 403) {
+        console.log('🔁 Reconnecting...');
+        startBot();
+      } else {
+        console.log('❌ Session expired. Delete /auth to reset.');
+      }
+    }
   });
 
-  client.on('auth_failure', msg => console.error('❌ Authentication failed:', msg));
-  client.on('disconnected', reason => console.warn(`⚠️ Disconnected: ${reason}`));
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
 
-  client.on('message', async msg => {
-    const sender = msg.from.split('@')[0];
-    const text = msg.body.trim().toLowerCase();
+    const sender = msg.key.remoteJid.split('@')[0];
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
-    if (text.startsWith("pair ")) {
-      const code = text.split(" ")[1].toUpperCase();
+    if (text.toLowerCase().startsWith('pair ')) {
+      const code = text.split(' ')[1]?.toUpperCase();
       db.get(`SELECT * FROM pairing_codes WHERE code = ? AND verified = 0`, [code], (err, row) => {
         if (row) {
           db.run(`UPDATE pairing_codes SET verified = 1 WHERE code = ?`, [code]);
-          client.sendMessage(msg.from, `✅ Pairing successful. Bot restarting...`);
-          client.sendMessage(`${centralBusinessNumber}@c.us`, `🔐 Code *${code}* verified. Restarting bot...`);
-          pushToGitHub('✅ Pairing code verified');
-          setTimeout(() => process.exit(0), 2000); // Auto restart bot
+          sock.sendMessage(msg.key.remoteJid, { text: `✅ Pairing successful. Restarting bot...` });
+          pushToGitHub(`✅ Pairing code ${code} verified`);
+          setTimeout(() => process.exit(0), 2000);
         } else {
-          client.sendMessage(msg.from, `❌ Invalid or used code.`);
+          sock.sendMessage(msg.key.remoteJid, { text: `❌ Invalid or already used code.` });
         }
       });
       return;
     }
 
     if (text.includes("allow me")) {
-      const apiKey = Math.floor(10000000 + Math.random() * 90000000).toString();
-      db.run(`INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)`, [sender, apiKey], async err => {
-        if (!err) {
-          await client.sendMessage(msg.from, `✅ You're activated!\n🔑 API Key: *${apiKey}*\nVisit: https://stackverify.vercel.app`);
-          pushToGitHub(`✅ User ${sender} registered`);
-        } else {
-          await client.sendMessage(msg.from, '⚠️ Registration error, try again.');
-        }
-      });
-      return;
-    }
-
-    if (text.includes("recover apikey")) {
-      pullFromGitHub();
-      db.get(`SELECT apiKey FROM users WHERE number = ?`, [sender], async (err, row) => {
-        if (row) await client.sendMessage(msg.from, `🔐 Your API Key: *${row.apiKey}*`);
-        else await client.sendMessage(msg.from, `⚠️ No key found. Send *allow me*.`);
+      const apiKey = crypto.randomInt(10000000, 99999999).toString();
+      db.run(`INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)`, [sender, apiKey], err => {
+        if (!err) sock.sendMessage(msg.key.remoteJid, { text: `✅ You're activated!\n🔑 API Key: *${apiKey}*` });
       });
       return;
     }
 
     if (text === ".ping") {
-      await client.sendMessage(msg.from, `✅ Bot is online.`);
+      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online." });
       return;
-    }
-
-    try {
-      const aiRes = await axios.post(
-        'https://troverstarapiai.vercel.app/api/chat',
-        { messages: [{ role: "user", content: msg.body }], model: "gpt-3.5-turbo" },
-        { headers: { "Content-Type": "application/json" } }
-      );
-      const reply = aiRes.data?.response?.content || "🤖 I didn't understand that.";
-      await client.sendMessage(msg.from, reply);
-    } catch (e) {
-      console.error("AI error:", e.message);
-      await client.sendMessage(msg.from, "❌ AI unavailable. Try later.");
     }
   });
 
-  client.initialize();
-
+  // OTP endpoints
   app.post('/request-code', async (req, res) => {
     const { phone } = req.body;
-    if (!phone) return res.status(400).json({ message: 'Phone number is required.' });
-
+    if (!phone) return res.status(400).json({ message: 'Phone required' });
     const code = crypto.randomInt(1000, 9999).toString();
     const createdAt = Date.now();
-
-    db.run(
-      `INSERT INTO verification_codes (phone, code, created_at) VALUES (?, ?, ?)`,
-      [phone, code, createdAt],
-      async function (err) {
-        if (err) return res.status(500).json({ message: 'Failed to store code.' });
-
-        const chatId = `${phone}@c.us`;
-        try {
-          await client.sendMessage(chatId, `${code} is your verification code. For your security, do not share this code.`);
-          res.json({ message: 'OTP sent to WhatsApp.' });
-        } catch (e) {
-          console.error("WhatsApp send failed:", e.message);
-          res.status(500).json({ message: 'Failed to send OTP on WhatsApp.' });
-        }
-      }
-    );
+    db.run(`INSERT INTO verification_codes (phone, code, created_at) VALUES (?, ?, ?)`, [phone, code, createdAt]);
+    try {
+      await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: `${code} is your verification code.` });
+      res.json({ message: 'OTP sent' });
+    } catch {
+      res.status(500).json({ message: 'Failed to send OTP' });
+    }
   });
 
   app.post('/verify-code', (req, res) => {
     const { phone, code } = req.body;
     const expiry = Date.now() - 5 * 60 * 1000;
-
-    if (!phone || !code) return res.status(400).json({ valid: false, message: 'Phone and code are required.' });
-
-    db.get(
-      `SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`,
-      [phone, code, expiry],
-      (err, row) => {
-        if (err) return res.status(500).json({ valid: false, message: 'Database error.' });
-        if (row) return res.json({ valid: true, message: '✅ Code is valid!' });
-        else return res.status(400).json({ valid: false, message: '❌ Invalid or expired code.' });
-      }
-    );
+    db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
+      if (row) res.json({ valid: true });
+      else res.status(400).json({ valid: false });
+    });
   });
 
   app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 }
+startBot();
+
+// Backup every 2 mins
+setInterval(() => pushToGitHub('⏱️ Auto-backup'), 2 * 60 * 1000);
