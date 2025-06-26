@@ -67,15 +67,15 @@ app.get('/qr', async (req, res) => {
   res.send(`<img src='${url}' alt='QR Code'/><p>or enter code: ${pairingCodes.join(', ')}</p>`);
 });
 
-async function generatePairingCodes() {
+async function generatePairingCode() {
+  if (pairingCodes.length > 0) return; // Avoid multiple codes
+
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  for (let i = 0; i < 3; i++) {
-    let code = '';
-    for (let j = 0; j < 8; j++) code += chars[Math.floor(Math.random() * chars.length)];
-    const createdAt = Date.now();
-    db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, createdAt]);
-    pairingCodes.push(code);
-  }
+  let code = '';
+  for (let j = 0; j < 8; j++) code += chars[Math.floor(Math.random() * chars.length)];
+  const createdAt = Date.now();
+  db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, createdAt]);
+  pairingCodes.push(code);
 }
 
 async function startBot() {
@@ -99,8 +99,8 @@ async function startBot() {
     if (qr) {
       qrData = qr;
       pairingCodes.length = 0;
-      await generatePairingCodes();
-      console.log("🔐 Scan QR or enter one of these codes:", pairingCodes.join(', '));
+      await generatePairingCode();
+      console.log("🔐 Scan QR or enter pairing code:", pairingCodes.join(', '));
     }
 
     if (connection === 'open') {
@@ -129,14 +129,19 @@ async function startBot() {
 
     if (text.toLowerCase().startsWith('pair ')) {
       const code = text.split(' ')[1]?.toUpperCase();
-      db.get(`SELECT * FROM pairing_codes WHERE code = ? AND verified = 0`, [code], (err, row) => {
+      db.get(`SELECT * FROM pairing_codes WHERE code = ? AND verified = 0`, [code], async (err, row) => {
+        if (err) {
+          sock.sendMessage(msg.key.remoteJid, { text: '❌ Internal error verifying code.' });
+          return;
+        }
+
         if (row) {
           db.run(`UPDATE pairing_codes SET verified = 1 WHERE code = ?`, [code]);
-          sock.sendMessage(msg.key.remoteJid, { text: `✅ Pairing successful. Restarting bot...` });
+          await sock.sendMessage(msg.key.remoteJid, { text: `✅ Pairing successful. Bot will restart now.` });
           pushToGitHub(`✅ Pairing code ${code} verified`);
-          setTimeout(() => process.exit(0), 2000);
+          setTimeout(() => process.exit(0), 3000);
         } else {
-          sock.sendMessage(msg.key.remoteJid, { text: `❌ Invalid or already used code.` });
+          sock.sendMessage(msg.key.remoteJid, { text: `❌ Invalid or already used pairing code.` });
         }
       });
       return;
