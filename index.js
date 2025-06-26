@@ -9,7 +9,11 @@ const qrcode = require('qrcode');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const {
+    useMultiFileAuthState,
+    makeCacheableSignalKeyStore,
+    fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
 
 const app = express();
 app.use(cors());
@@ -45,7 +49,7 @@ function pushToGitHub(msg = 'Update bot data') {
     setupGit();
     runGit('git add .');
     try {
-        execSync('git diff --cached --quiet || git commit -m "${msg}"', { cwd: LOCAL_REPO_PATH });
+        execSync(`git diff --cached --quiet || git commit -m '${msg}'`, { cwd: LOCAL_REPO_PATH });
         runGit('git push');
     } catch (err) {
         console.error("❌ Git push error:", err.message);
@@ -103,29 +107,20 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    if (!fs.existsSync('./auth/creds.json')) {
-        console.log('🔗 Requesting pairing code...');
-        try {
-            const code = await sock.requestPairingCode(centralBusinessNumber);
-            if (code) {
-                console.log(`🔐 Pairing Code: ${code}`);
-                pairingCodes.length = 0;
-                pairingCodes.push(code);
-                db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, Date.now()]);
-            }
-        } catch (err) {
-            console.error('❌ Failed to get pairing code:', err);
-        }
-    }
-
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
+
+        if (connection === 'connecting') {
+            console.log('🔌 Connecting...');
+        }
+
         if (connection === 'open') {
             console.log('✅ Connected to WhatsApp');
             retryCount = 0;
             await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is now online!' });
             pushToGitHub('🤖 Bot connected');
         }
+
         if (connection === 'close') {
             const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
             console.warn('❌ Disconnected. Reason:', reason);
@@ -136,6 +131,22 @@ async function startBot() {
             } else {
                 console.error('🛑 Too many retries or session expired. Exiting...');
                 process.exit(1);
+            }
+        }
+
+        // Request pairing only after connection is starting
+        if (connection === 'connecting' && !fs.existsSync('./auth/creds.json')) {
+            console.log('🔗 Requesting pairing code...');
+            try {
+                const code = await sock.requestPairingCode(centralBusinessNumber);
+                if (code) {
+                    console.log(`🔐 Pairing Code: ${code}`);
+                    pairingCodes.length = 0;
+                    pairingCodes.push(code);
+                    db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, Date.now()]);
+                }
+            } catch (err) {
+                console.error('❌ Failed to get pairing code:', err);
             }
         }
     });
