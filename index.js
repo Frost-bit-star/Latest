@@ -9,7 +9,11 @@ const qrcode = require('qrcode');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const {
+  useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
 
 const app = express();
 app.use(cors());
@@ -68,7 +72,7 @@ app.get('/qr', async (req, res) => {
 });
 
 async function generatePairingCode() {
-  if (pairingCodes.length > 0) return; // Avoid multiple codes
+  if (pairingCodes.length > 0) return;
 
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let code = '';
@@ -87,6 +91,11 @@ async function startBot() {
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, fs),
+    },
+    linkPhoneNumber: true,
+    phoneNumber: {
+      number: centralBusinessNumber,
+      countryCode: centralBusinessNumber.slice(0, 3), // assumes '255'
     },
     printQRInTerminal: false,
     generateHighQualityLinkPreview: true,
@@ -189,5 +198,5 @@ async function startBot() {
 }
 startBot();
 
-// Backup every 2 mins
+// Auto-backup every 2 mins
 setInterval(() => pushToGitHub('⏱️ Auto-backup'), 2 * 60 * 1000);
