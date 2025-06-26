@@ -5,7 +5,6 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const crypto = require('crypto');
-const qrcode = require('qrcode');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
@@ -25,7 +24,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
 const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
 
-// Git Setup
+// === Git Setup ===
 function runGit(cmd, cwd = LOCAL_REPO_PATH) {
   try { execSync(cmd, { cwd, stdio: 'inherit' }); } catch (err) { console.error("❌ Git failed:", err.message); }
 }
@@ -63,17 +62,11 @@ db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (code TEXT PRIMARY KEY, created_at INTEGER, verified INTEGER DEFAULT 0)`);
 });
 
-let qrData = null;
 const pairingCodes = [];
 
-app.get('/qr', async (req, res) => {
-  if (!qrData && pairingCodes.length === 0) return res.status(503).json({ message: 'Pairing code not ready yet' });
-  let output = '';
-  if (qrData) {
-    const url = await qrcode.toDataURL(qrData);
-    output = `<img src='${url}' alt='QR Code'/>`;
-  }
-  res.send(`${output}<p>Pairing Code: <b>${pairingCodes.join(', ')}</b></p>`);
+app.get('/pair-code', (req, res) => {
+  if (pairingCodes.length === 0) return res.status(503).json({ message: 'Pairing code not ready yet' });
+  res.send(`<p>Pairing Code: <b>${pairingCodes.join(', ')}</b></p>`);
 });
 
 async function startBot() {
@@ -92,7 +85,7 @@ async function startBot() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // 🔐 Trigger pairing code (fix)
+  // ✅ Only trigger pairing code if not already linked
   if (!fs.existsSync('./auth/creds.json')) {
     console.log('🔗 Requesting pairing code...');
     try {
@@ -104,17 +97,12 @@ async function startBot() {
         db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, Date.now()]);
       }
     } catch (err) {
-      console.error('❌ Failed to get pairing code:', err);
+      console.error('❌ Failed to generate pairing code:', err);
     }
   }
 
   sock.ev.on('connection.update', async (update) => {
-    const { connection, qr, lastDisconnect } = update;
-
-    if (qr) {
-      qrData = qr;
-      console.log("🔐 QR Code received");
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'open') {
       console.log('✅ Connected to WhatsApp');
@@ -126,9 +114,9 @@ async function startBot() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       if (reason !== 403) {
         console.log('🔁 Reconnecting...');
-        startBot();
+        setTimeout(startBot, 3000); // prevent multiple `app.listen` error
       } else {
-        console.log('❌ Session expired. Delete /auth and restart to re-pair.');
+        console.log('❌ Session expired. Delete /auth and restart.');
       }
     }
   });
@@ -143,17 +131,13 @@ async function startBot() {
     if (text.toLowerCase().startsWith('pair ')) {
       const code = text.split(' ')[1]?.toUpperCase();
       db.get(`SELECT * FROM pairing_codes WHERE code = ? AND verified = 0`, [code], async (err, row) => {
-        if (err) {
-          sock.sendMessage(msg.key.remoteJid, { text: '❌ Internal error verifying code.' });
-          return;
-        }
         if (row) {
           db.run(`UPDATE pairing_codes SET verified = 1 WHERE code = ?`, [code]);
-          await sock.sendMessage(msg.key.remoteJid, { text: `✅ Pairing successful. Bot restarting...` });
+          await sock.sendMessage(msg.key.remoteJid, { text: `✅ Pairing successful. Restarting bot...` });
           pushToGitHub(`✅ Pairing code ${code} verified`);
-          setTimeout(() => process.exit(0), 3000);
+          setTimeout(() => process.exit(0), 5000); // Graceful shutdown
         } else {
-          sock.sendMessage(msg.key.remoteJid, { text: `❌ Invalid or used pairing code.` });
+          sock.sendMessage(msg.key.remoteJid, { text: `❌ Invalid or already used pairing code.` });
         }
       });
       return;
@@ -173,7 +157,7 @@ async function startBot() {
     }
   });
 
-  // OTP routes
+  // OTP APIs
   app.post('/request-code', async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
@@ -196,10 +180,11 @@ async function startBot() {
       else res.status(400).json({ valid: false });
     });
   });
-
-  app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 }
+
+// ✅ Start server first to avoid port re-bind issues on restart
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 startBot();
 
-// Backup every 2 minutes
+// 🔁 Auto Git backup every 2 mins
 setInterval(() => pushToGitHub('⏱️ Auto-backup'), 2 * 60 * 1000);
