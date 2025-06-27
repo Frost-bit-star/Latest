@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { useSingleFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 
 const app = express();
 app.use(cors());
@@ -17,7 +17,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const GITHUB_REPO = 'https://github.com/Frost-bit-star/Whatsapp-storage.git';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
+const centralBusinessNumber = '255776822641'; // 🔒 Fixed business number
 const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
 
 // === GitHub Sync Functions ===
@@ -71,66 +71,38 @@ db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS verification_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, code TEXT, created_at INTEGER)`);
 });
 
-// === Middleware to validate API Key in headers ===
-async function validateApiKey(req, res, next) {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) return res.status(401).json({ error: 'API key required in x-api-key header' });
-  
-  db.get('SELECT * FROM users WHERE apiKey = ?', [apiKey], (err, row) => {
-    if (err) return res.status(500).json({ error: 'DB error' });
-    if (!row) return res.status(403).json({ error: 'Invalid API key' });
-    req.user = row;
-    next();
-  });
-}
-
-let retryCount = 0;
-const MAX_RETRIES = 5;
-
 async function startBot() {
+  const { state, saveState } = useSingleFileAuthState('./session.json');
   const { version } = await fetchLatestBaileysVersion();
-
-  // === Load your raw decoded session.json
-  const rawSession = require('./session.json');
-
-  // === Convert it to { creds, keys } structure
-  const session = {
-    creds: rawSession,
-    keys: {
-      preKeys: {},
-      sessions: {},
-      senderKeys: {},
-      appStateSyncKeys: {},
-      appStateVersions: {}
-    }
-  };
 
   const sock = makeWASocket({
     version,
-    auth: { creds: session.creds, keys: makeCacheableSignalKeyStore(session.keys, fs) },
+    auth: state,
     browser: ['Chrome (Windows)', 'Chrome', '110.0.0.0'],
-    printQRInTerminal: false,
-    generateHighQualityLinkPreview: true,
   });
 
+  sock.ev.on('creds.update', saveState);
+
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, isNewLogin } = update;
     if (connection === 'connecting') console.log('🔌 Connecting...');
     if (connection === 'open') {
-      console.log('✅ Connected using updated hardcoded session');
-      retryCount = 0;
-      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with updated session!' });
+      console.log('✅ Connected using pairing code session');
+      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with pairing code session!' });
       pushToGitHub('🤖 Bot connected');
     }
     if (connection === 'close') {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.warn('❌ Disconnected. Reason:', reason);
-      if (reason !== 403 && retryCount < MAX_RETRIES) {
-        retryCount++;
-        console.log(`🔁 Retry attempt ${retryCount}/${MAX_RETRIES}`);
-        setTimeout(startBot, 5000);
-      } else {
-        console.error('🛑 Too many retries or session expired. Exiting...');
+      process.exit(1);
+    }
+    if (isNewLogin) {
+      try {
+        console.log('🔑 Generating pairing code...');
+        const code = await sock.requestPairingCode(centralBusinessNumber);
+        console.log('🔗 Pairing Code for +255 776 822 641:', code);
+      } catch (err) {
+        console.error('❌ Failed to generate pairing code:', err.message);
         process.exit(1);
       }
     }
@@ -158,12 +130,13 @@ async function startBot() {
     }
 
     if (text === ".ping") {
-      await sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with hardcoded session." });
+      await sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with pairing code session." });
       return;
     }
   });
 
-  // === OTP endpoints with API key validation ===
+  // === Express endpoints ===
+
   app.post('/request-code', validateApiKey, async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
@@ -196,6 +169,18 @@ async function startBot() {
     } catch (err) {
       res.status(500).json({ error: 'Failed to send message' });
     }
+  });
+}
+
+function validateApiKey(req, res, next) {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'API key required in x-api-key header' });
+  
+  db.get('SELECT * FROM users WHERE apiKey = ?', [apiKey], (err, row) => {
+    if (err) return res.status(500).json({ error: 'DB error' });
+    if (!row) return res.status(403).json({ error: 'Invalid API key' });
+    req.user = row;
+    next();
   });
 }
 
