@@ -90,7 +90,20 @@ const MAX_RETRIES = 5;
 async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
-  const session = require('./session.json'); // 🔴 Recommended: store your long JSON as session.json
+  // === Load your raw decoded session.json
+  const rawSession = require('./session.json');
+
+  // === Convert it to { creds, keys } structure
+  const session = {
+    creds: rawSession,
+    keys: {
+      preKeys: {},
+      sessions: {},
+      senderKeys: {},
+      appStateSyncKeys: {},
+      appStateVersions: {}
+    }
+  };
 
   const sock = makeWASocket({
     version,
