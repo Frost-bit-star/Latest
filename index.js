@@ -8,7 +8,8 @@ const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useSingleFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { useSingleFileAuthState } = require('@whiskeysockets/baileys/lib/StateManagement'); // ✅ Fixed import
 
 const app = express();
 app.use(cors());
