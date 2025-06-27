@@ -103,7 +103,10 @@ async function startBot() {
     generateHighQualityLinkPreview: true,
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    pushToGitHub('🔑 Session updated');
+  });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
@@ -139,7 +142,6 @@ async function startBot() {
           pairingCodes.length = 0;
           pairingCodes.push(code);
           db.run(`INSERT OR IGNORE INTO pairing_codes (code, created_at) VALUES (?, ?)`, [code, Date.now()]);
-          // === Send pairing code directly to central business number ===
           await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: `🔐 Your WhatsApp Bot Pairing Code: *${code}*` });
         }
       } catch (err) {
@@ -184,6 +186,7 @@ async function startBot() {
     }
   });
 
+  // === OTP endpoints ===
   app.post('/request-code', async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
@@ -206,9 +209,13 @@ async function startBot() {
       else res.status(400).json({ valid: false });
     });
   });
-
-  app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 }
 
+// === Start bot ===
 startBot();
+
+// === Start server ===
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// === Auto backup ===
 setInterval(() => pushToGitHub('⏱️ Auto-backup'), 2 * 60 * 1000);
