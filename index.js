@@ -1,83 +1,173 @@
-// verification.js
 require('dotenv').config();
 const express = require('express');
-const qrcode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const sqlite3 = require('sqlite3').verbose();
+const cors = require('cors');
+const crypto = require('crypto');
+const qrcode = require('qrcode');
+const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { makeCacheableSignalKeyStore, fetchLatestBaileysVersion, BufferJSON } = require('@whiskeysockets/baileys');
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const GITHUB_REPO = 'https://github.com/Frost-bit-star/Whatsapp-storage.git';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
+const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
 
-let sock = null;
-let sessionData = null;
-let pairingCode = null;
+// === GitHub Sync Functions ===
+function runGit(cmd, cwd = LOCAL_REPO_PATH) {
+  try {
+    execSync(cmd, { cwd, stdio: 'inherit' });
+  } catch (err) {
+    console.error("❌ Git failed:", err.message);
+  }
+}
 
-app.get('/', (req, res) => {
-  res.send(`
-    <h2>WhatsApp Pairing</h2>
-    <form method="POST" action="/pair">
-      <input name="number" placeholder="Enter your phone number" required />
-      <button type="submit">Generate Pairing Code</button>
-    </form>
-    ${pairingCode ? `<p>Pairing Code: <b>${pairingCode}</b></p>` : ''}
-    ${sessionData ? `<h3>Session Data</h3><textarea rows="20" cols="100">${sessionData}</textarea>` : ''}
-  `);
+function cloneRepo() {
+  if (!fs.existsSync(LOCAL_REPO_PATH)) {
+    const tokenUrl = GITHUB_REPO.replace('https://', `https://${GITHUB_TOKEN}@`);
+    execSync(`git clone ${tokenUrl} repo-data`, { cwd: __dirname, stdio: 'inherit' });
+  }
+}
+
+function setupGit() {
+  runGit('git config user.name "Frostbit Star"');
+  runGit('git config user.email "morganmilstone983@gmail.com"');
+}
+
+function pushToGitHub(msg = 'Update bot data') {
+  setupGit();
+  runGit('git add .');
+  try {
+    execSync(`git diff --cached --quiet || git commit -m '${msg}'`, { cwd: LOCAL_REPO_PATH });
+    runGit('git push');
+  } catch (err) {
+    console.error("❌ Git push error:", err.message);
+  }
+}
+
+function pullFromGitHub() {
+  runGit('git pull');
+}
+
+// === Initialize Repo and DB ===
+cloneRepo();
+pullFromGitHub();
+
+const dbPath = path.join(LOCAL_REPO_PATH, 'botdata.db');
+const db = new sqlite3.Database(dbPath, err => {
+  if (err) console.error("❌ DB Error:", err);
+  else console.log("✅ Database connected");
 });
 
-app.post('/pair', async (req, res) => {
-  const number = req.body.number;
-  if (!number) return res.send("Phone number required.");
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE, apiKey TEXT)`);
+  db.run(`CREATE TABLE IF NOT EXISTS verification_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, code TEXT, created_at INTEGER)`);
+  db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (code TEXT PRIMARY KEY, created_at INTEGER, verified INTEGER DEFAULT 0)`);
+});
 
-  const { state, saveCreds } = await useMultiFileAuthState('./auth-' + number);
+let qrData = null;
+const pairingCodes = [];
+
+app.get('/qr', async (req, res) => {
+  if (!qrData && pairingCodes.length === 0) return res.status(503).json({ message: 'Pairing code not ready yet' });
+  let output = '';
+  if (qrData) {
+    const url = await qrcode.toDataURL(qrData);
+    output = `<img src='${url}' alt='QR Code'/>`;
+  }
+  res.send(`${output}<p>Pairing Code: <b>${pairingCodes.join(', ')}</b></p>`);
+});
+
+let retryCount = 0;
+const MAX_RETRIES = 5;
+
+async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
-  sock = makeWASocket({
-    version,
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, fs),
-    },
-    printQRInTerminal: true,
-    generateHighQualityLinkPreview: true,
-  });
+  // === Decode hardcoded session ===
+  const hardcodedSession = 'BWM-XMD;;;H4sIAAAAAAAAA62Va4+iSBSG/0t9bXfkfjHpZLmpqIg2XtDNfqiGAkoFyqJAcdL/fYPdvdPJzM70JsMnLsU5z3vqPae+gqLEFZqiFgy+AkJxAxnqbllLEBgAs04SREEPxJBBMACOKe1GQotG28tp7cC9L16Fp9l0OA9aZXPW+UQPnzN3uZiG6SN46QFSP59w9JOAmB2YH9WpN0Ujlm/qC1aXphpc4hWpW+htGrVezhzvYgvLR/DSRYSY4iJ1SIZyROFpitoFxPRz+MGo0UhpjnyiNMVskhF8curUzB/66sXoNwWfPJR8WIdobHwOv1he1s7cbHjzHNflGgfadlaxbWpIosSPovV8n+v2splJBveKX+G0QLEbo4Jh1n667tFs6Qcr97oo4li4TWTloVpIyj7YzncoW41WsW4LkzqEN875HPhy4m2mlTptoUkmk81FXtQRXcZbz4Vj57Bvw+3NtL3ZjhfLj+AL+u6V4/+pu2+FG00tqqdSRX1YPNX1pqjLfBFEWb8t1a2XxI11XEweRrvP4Q/9NbeKD/5kHV62/ZOFttk6WF+TkE6Tscb1j8sJMXxbKobON3zIavozyvBKyO5yyI5xtFptJavZNu6Q20xLD/l+NE8hf7bc1JRT/syL7ZqOJ0Ff4qFzCt3AGiXtUsLofJRWz81JvNy87FinYpo+3hUdUevGYMC/9ABFKa4YhQyXRfdO6wEYNwGKKGL34oI8FjKtYXZzuK5H3kNtTeC+dTPZj6ei55CLMISyddZlTjs+gh4gtIxQVaF4jCtW0tZDVQVTVIHBX/d96iRTlJcMTXAMBkCQZVVVNEFQJP7P6sslg6yChHwpEAM9kNAy9xAYMFqjHrj/YJn80FFNWdUtQZYljdNtRbFNi+M5nbM4pROYvyZd4RxVDOYEDHhV5jlB5BXppfd7OAxLsGTFGDqOwquSaDm6biuqOLQsU7IMTv4Fh/K7OEzDVjVVUDlFVzlNN0xeFfUhbyiOyluqrf+cQ/tt9dAMi1MVmeNkWVRFWdLNoeRwsumYgiY4v+TQXv7ugQJd2WtXd14U+R5IMK3YuqjJqYTxe8u/f4RRVNYFC9oisrobRMHgw2vEGC7SqlNWF5BGGW6Q1ekAgwSeKvSv/RFF8buWt5FulXHXlZI13HBjXwYdexfou9oMBOn78pzuy3hdlHSRlzVNlQVV71Z2H3qggF0wsKJlg2jFIP0jh/SIGDnBCHV1elPQJYwRg/hUdcb37b2scUNnNtMeInc0MpzUsFIDfFP8PldeO1cxOYmT5L5/EMh6/0xv7UEumikRnyN520wL8UzdDNmJuVw//iAIGICnQBluNOeoMRuFaLQSVUyaOOCu1h7v+YbIirz0EhyML3yaBwk7SMa8ssIJ3mwWYUpg4sJ4f9T5xXjHhP2YjLI0N4zHLluMGhyhj8n025N6zZKd3SbnHcu4wuEhN+xf4zFZmKIr9l2PonxbXTd7H02vt+dQJOZRTSO2g5ExP3De9flWH8jSufJThbTh1ab4beLdJ+7p7aTDb9MI3x8TjO4Hx9um/HJvX8E7C3IvvQ8x3o6i/xjnJkpjf+77ya3Uz5vRVtG08mGvtudYEP0NbYmunFs3TMXLegheul4gJ8iSkuZgAGAR0/LuHFrWnafdIil/kswyONcyXpWfYMWMb33yo1Ekvq5a0JKMYZWBARDTxXpy7EzfGoQEDLL3tgNGd02lBrz8A+UsmjOvCQAA';
+  const decoded = BufferJSON.reviver('', JSON.parse(Buffer.from(hardcodedSession.split(';;;')[2], 'base64').toString()));
 
-  sock.ev.on('creds.update', async () => {
-    await saveCreds();
+  const sock = makeWASocket({
+    version,
+    auth: { creds: decoded.creds, keys: makeCacheableSignalKeyStore(decoded.keys, fs) },
+    printQRInTerminal: false,
+    generateHighQualityLinkPreview: true,
   });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
-
     if (connection === 'connecting') console.log('🔌 Connecting...');
     if (connection === 'open') {
-      console.log('✅ Connected to WhatsApp');
-      const session = JSON.stringify(state.creds, null, 2);
-      sessionData = session;
+      console.log('✅ Connected using hardcoded session');
+      retryCount = 0;
+      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with hardcoded session!' });
+      pushToGitHub('🤖 Bot connected');
     }
     if (connection === 'close') {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.warn('❌ Disconnected. Reason:', reason);
-    }
-
-    // === Request pairing code ===
-    if (connection === 'connecting') {
-      console.log('🔗 Requesting pairing code...');
-      try {
-        pairingCode = await sock.requestPairingCode(number);
-        console.log(`🔐 Pairing Code: ${pairingCode}`);
-      } catch (err) {
-        console.error('❌ Failed to get pairing code:', err);
+      if (reason !== 403 && retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log(`🔁 Retry attempt ${retryCount}/${MAX_RETRIES}`);
+        setTimeout(startBot, 5000);
+      } else {
+        console.error('🛑 Too many retries or session expired. Exiting...');
+        process.exit(1);
       }
     }
   });
 
-  res.redirect('/');
-});
+  sock.ev.on('messages.upsert', async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+    const sender = msg.key.remoteJid.split('@')[0];
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
-app.listen(PORT, () => console.log(`🚀 Verification server running on http://localhost:${PORT}`));
+    if (text === ".ping") {
+      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with hardcoded session." });
+      return;
+    }
+  });
+
+  // === OTP endpoints ===
+  app.post('/request-code', async (req, res) => {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ message: 'Phone required' });
+    const code = crypto.randomInt(1000, 9999).toString();
+    const createdAt = Date.now();
+    db.run(`INSERT INTO verification_codes (phone, code, created_at) VALUES (?, ?, ?)`, [phone, code, createdAt]);
+    try {
+      await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: `${code} is your verification code.` });
+      res.json({ message: 'OTP sent' });
+    } catch {
+      res.status(500).json({ message: 'Failed to send OTP' });
+    }
+  });
+
+  app.post('/verify-code', (req, res) => {
+    const { phone, code } = req.body;
+    const expiry = Date.now() - 5 * 60 * 1000;
+    db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
+      if (row) res.json({ valid: true });
+      else res.status(400).json({ valid: false });
+    });
+  });
+}
+
+// === Start bot ===
+startBot();
+
+// === Start server ===
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+// === Auto backup ===
+setInterval(() => pushToGitHub('⏱️ Auto-backup'), 2 * 60 * 1000);
