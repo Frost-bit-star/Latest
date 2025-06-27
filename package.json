@@ -1,23 +1,27 @@
 {
-  "name": "whatsapp-baileys-bot",
+  "name": "whatsapp-bot-server",
   "version": "1.0.0",
-  "description": "WhatsApp bot using Baileys with Express, SQLite, PostgreSQL, GitHub syncing, and OTP support.",
+  "description": "WhatsApp bot using Baileys with hardcoded session, API key auth, OTP, self messaging, GitHub sync, and Express server",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "author": "Frostbit Star",
-  "license": "MIT",
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.7.2",
+    "@whiskeysockets/baileys": "^6.7.1",
     "cors": "^2.8.5",
     "crypto": "^1.0.1",
-    "dotenv": "^16.3.2",
+    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "path": "^0.12.7",
-    "pg": "^8.11.5",
-    "qrcode": "^1.5.3",
-    "sqlite3": "^5.1.7"
-  }
+    "sqlite3": "^5.1.6"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Frost-bit-star/Whatsapp-storage.git"
+  },
+  "author": "Frostbit Star",
+  "license": "MIT"
 }

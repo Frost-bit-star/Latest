@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { makeCacheableSignalKeyStore, fetchLatestBaileysVersion, BufferJSON } = require('@whiskeysockets/baileys');
 
 const app = express();
 app.use(cors());
@@ -90,56 +90,9 @@ const MAX_RETRIES = 5;
 async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
-  // === Your hardcoded session with your number +255776822641 ===
-  const session = {
-    "creds": {
-      "noiseKey": {
-        "private": "iYw0yMEPG6j06Y4QSY48iCHfV+jSz6aZc2r3bE2MrXI=",
-        "public": "hZHm9WYn3crwIB+4n4xf8v0fIptKUsLDnfx8bwYotB4="
-      },
-      "signedIdentityKey": {
-        "private": "iBDoYlNq3mtWmj7rj9pXsEcBllhZH9U5eUdB7+ftYl8=",
-        "public": "2l3B2yV50Xflqpug3PfKeWW8UpjISfO2n3mWyBdrTTo="
-      },
-      "signedPreKey": {
-        "keyId": 1,
-        "public": "4OjvUb7wyfA7O0SS+kv1PWB1QGEr3Wgq+vjo19RJ3H8=",
-        "signature": "txFvTtXl7A8rWfA4+39Y3eA/52d8EtkHeIbq+j5Zzq/ILtnoVvS0Vo4fx2hHPz9clT7mruVL6LoRhg0JDo1uDw=="
-      },
-      "registrationId": 17034,
-      "advSecretKey": "Ef1v3hgkH8xDsyhiPZ9vSvWSMfqLZmtJHL+e0B5yi+0=",
-      "nextPreKeyId": 2,
-      "firstUnuploadedPreKeyId": 2,
-      "account": {
-        "details": "CPTblJYGEJy8zKIGGAM=",
-        "accountSignatureKey": "T3NWit9E1nQX0TrbPydGTNPF1Hqtba3UyDlmoDwXb3g=",
-        "accountSignature": "f1hHTu8eJ1b1HLRKwYzMKUGNEObU1YoWJGytJKnPIvdHpAly2Z/H24zONhsHu9zK/wY5H65N9ZvdXdpKkX31Ag==",
-        "deviceSignature": "JkLTk88IIdLMK1+CHZ9yVyWqX6oQ7iPrX9quVCXJ1FTa5QiZ63qSFiDoCGw9sVQHRlqV47iUlNnv7Y0mvMVuAg=="
-      },
-      "me": {
-        "id": "255776822641@s.whatsapp.net",
-        "verifiedName": "",
-        "name": "WhatsApp Bot"
-      },
-      "signalIdentities": [
-        {
-          "identifier": {
-            "name": "255776822641@s.whatsapp.net",
-            "deviceId": 0
-          },
-          "identifierKey": "T3NWit9E1nQX0TrbPydGTNPF1Hqtba3UyDlmoDwXb3g="
-        }
-      ],
-      "lastAccountSyncTimestamp": 1719498399,
-      "myAppStateKeyId": "AAAAAFsz"
-    },
-    "keys": {
-      "preKeys": {
-        "1": "4OjvUb7wyfA7O0SS+kv1PWB1QGEr3Wgq+vjo19RJ3H8="
-      },
-      "sessions": {}
-    }
-  };
+  // === Hardcoded session (decoded using BufferJSON.reviver) ===
+  const rawSession = fs.readFileSync(path.join(LOCAL_REPO_PATH, 'session.json'), 'utf-8');
+  const session = BufferJSON.reviver('', JSON.parse(rawSession));
 
   const sock = makeWASocket({
     version,
@@ -178,8 +131,26 @@ async function startBot() {
     const sender = msg.key.remoteJid.split('@')[0];
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
+    // === "allow me" command ===
+    if (text.toLowerCase() === "allow me") {
+      const apiKey = crypto.randomBytes(16).toString('hex');
+      db.run('INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)', [sender, apiKey]);
+      await sock.sendMessage(msg.key.remoteJid, { text: `✅ Access granted. Your API key:\n${apiKey}` });
+      return;
+    }
+
+    // === "recover apikey" command ===
+    if (text.toLowerCase() === "recover apikey") {
+      db.get('SELECT apiKey FROM users WHERE number = ?', [sender], async (err, row) => {
+        if (row) await sock.sendMessage(msg.key.remoteJid, { text: `🔑 Your API key: ${row.apiKey}` });
+        else await sock.sendMessage(msg.key.remoteJid, { text: "❌ No API key found. Use 'allow me' first." });
+      });
+      return;
+    }
+
+    // === .ping command ===
     if (text === ".ping") {
-      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with hardcoded session." });
+      await sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with hardcoded session." });
       return;
     }
   });
@@ -206,6 +177,18 @@ async function startBot() {
       if (row) res.json({ valid: true });
       else res.status(400).json({ valid: false });
     });
+  });
+
+  // === Self message endpoint ===
+  app.post('/self-message', validateApiKey, async (req, res) => {
+    const { number, message } = req.body;
+    if (!number || !message) return res.status(400).json({ error: 'Number and message required' });
+    try {
+      await sock.sendMessage(`${number}@s.whatsapp.net`, { text: `From ${req.user.number} (${req.user.apiKey}):\n${message}` });
+      res.json({ sent: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to send message' });
+    }
   });
 }
 
