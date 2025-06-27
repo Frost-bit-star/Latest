@@ -3,9 +3,9 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
+const { Client } = require('pg');
 const cors = require('cors');
 const crypto = require('crypto');
-const qrcode = require('qrcode');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
@@ -20,6 +20,18 @@ const GITHUB_REPO = 'https://github.com/Frost-bit-star/Whatsapp-storage.git';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
 const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
+
+// === PostgreSQL setup ===
+const pgClient = new Client({
+  host: 'db.production.internal',
+  port: 5432,
+  user: 'prod_user',
+  password: 'P@ssw0rd123!',
+  database: 'postgres' // replace with your db name if different
+});
+pgClient.connect()
+  .then(() => console.log("✅ PostgreSQL connected"))
+  .catch(err => console.error("❌ PostgreSQL connection error:", err.stack));
 
 // === GitHub Sync Functions ===
 function runGit(cmd, cwd = LOCAL_REPO_PATH) {
@@ -57,14 +69,14 @@ function pullFromGitHub() {
   runGit('git pull');
 }
 
-// === Initialize Repo and DB ===
+// === Initialize Repo and SQLite DB ===
 cloneRepo();
 pullFromGitHub();
 
 const dbPath = path.join(LOCAL_REPO_PATH, 'botdata.db');
 const db = new sqlite3.Database(dbPath, err => {
   if (err) console.error("❌ DB Error:", err);
-  else console.log("✅ Database connected");
+  else console.log("✅ SQLite Database connected");
 });
 
 db.serialize(() => {
@@ -73,28 +85,27 @@ db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (code TEXT PRIMARY KEY, created_at INTEGER, verified INTEGER DEFAULT 0)`);
 });
 
-let qrData = null;
-const pairingCodes = [];
-
-app.get('/qr', async (req, res) => {
-  if (!qrData && pairingCodes.length === 0) return res.status(503).json({ message: 'Pairing code not ready yet' });
-  let output = '';
-  if (qrData) {
-    const url = await qrcode.toDataURL(qrData);
-    output = `<img src='${url}' alt='QR Code'/>`;
-  }
-  res.send(`${output}<p>Pairing Code: <b>${pairingCodes.join(', ')}</b></p>`);
-});
-
 let retryCount = 0;
 const MAX_RETRIES = 5;
 
 async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
-  // === Decode hardcoded session ===
-  const hardcodedSession = 'BWM-XMD;;;H4sIAAAAAAAAA62Va4+iSBSG/0t9bXfkfjHpZLmpqIg2XtDNfqiGAkoFyqJAcdL/fYPdvdPJzM70JsMnLsU5z3vqPae+gqLEFZqiFgy+AkJxAxnqbllLEBgAs04SREEPxJBBMACOKe1GQotG28tp7cC9L16Fp9l0OA9aZXPW+UQPnzN3uZiG6SN46QFSP59w9JOAmB2YH9WpN0Ujlm/qC1aXphpc4hWpW+htGrVezhzvYgvLR/DSRYSY4iJ1SIZyROFpitoFxPRz+MGo0UhpjnyiNMVskhF8curUzB/66sXoNwWfPJR8WIdobHwOv1he1s7cbHjzHNflGgfadlaxbWpIosSPovV8n+v2splJBveKX+G0QLEbo4Jh1n667tFs6Qcr97oo4li4TWTloVpIyj7YzncoW41WsW4LkzqEN875HPhy4m2mlTptoUkmk81FXtQRXcZbz4Vj57Bvw+3NtL3ZjhfLj+AL+u6V4/+pu2+FG00tqqdSRX1YPNX1pqjLfBFEWb8t1a2XxI11XEweRrvP4Q/9NbeKD/5kHV62/ZOFttk6WF+TkE6Tscb1j8sJMXxbKobON3zIavozyvBKyO5yyI5xtFptJavZNu6Q20xLD/l+NE8hf7bc1JRT/syL7ZqOJ0Ff4qFzCt3AGiXtUsLofJRWz81JvNy87FinYpo+3hUdUevGYMC/9ABFKa4YhQyXRfdO6wEYNwGKKGL34oI8FjKtYXZzuK5H3kNtTeC+dTPZj6ei55CLMISyddZlTjs+gh4gtIxQVaF4jCtW0tZDVQVTVIHBX/d96iRTlJcMTXAMBkCQZVVVNEFQJP7P6sslg6yChHwpEAM9kNAy9xAYMFqjHrj/YJn80FFNWdUtQZYljdNtRbFNi+M5nbM4pROYvyZd4RxVDOYEDHhV5jlB5BXppfd7OAxLsGTFGDqOwquSaDm6biuqOLQsU7IMTv4Fh/K7OEzDVjVVUDlFVzlNN0xeFfUhbyiOyluqrf+cQ/tt9dAMi1MVmeNkWVRFWdLNoeRwsumYgiY4v+TQXv7ugQJd2WtXd14U+R5IMK3YuqjJqYTxe8u/f4RRVNYFC9oisrobRMHgw2vEGC7SqlNWF5BGGW6Q1ekAgwSeKvSv/RFF8buWt5FulXHXlZI13HBjXwYdexfou9oMBOn78pzuy3hdlHSRlzVNlQVV71Z2H3qggF0wsKJlg2jFIP0jh/SIGDnBCHV1elPQJYwRg/hUdcb37b2scUNnNtMeInc0MpzUsFIDfFP8PldeO1cxOYmT5L5/EMh6/0xv7UEumikRnyN520wL8UzdDNmJuVw//iAIGICnQBluNOeoMRuFaLQSVUyaOOCu1h7v+YbIirz0EhyML3yaBwk7SMa8ssIJ3mwWYUpg4sJ4f9T5xXjHhP2YjLI0N4zHLluMGhyhj8n025N6zZKd3SbnHcu4wuEhN+xf4zFZmKIr9l2PonxbXTd7H02vt+dQJOZRTSO2g5ExP3De9flWH8jSufJThbTh1ab4beLdJ+7p7aTDb9MI3x8TjO4Hx9um/HJvX8E7C3IvvQ8x3o6i/xjnJkpjf+77ya3Uz5vRVtG08mGvtudYEP0NbYmunFs3TMXLegheul4gJ8iSkuZgAGAR0/LuHFrWnafdIil/kswyONcyXpWfYMWMb33yo1Ekvq5a0JKMYZWBARDTxXpy7EzfGoQEDLL3tgNGd02lBrz8A+UsmjOvCQAA';
-  const decoded = BufferJSON.reviver('', JSON.parse(Buffer.from(hardcodedSession.split(';;;')[2], 'base64').toString()));
+  // === Fetch session from PostgreSQL ===
+  let decoded;
+  try {
+    const result = await pgClient.query('SELECT session_data FROM whatsapp_sessions WHERE id = $1', [1]); // adjust your table and id
+    if (result.rows.length === 0) {
+      console.error('❌ No session found in database.');
+      process.exit(1);
+    }
+    const dbSession = result.rows[0].session_data;
+    decoded = BufferJSON.reviver('', JSON.parse(Buffer.from(dbSession.split(';;;')[2], 'base64').toString()));
+    console.log("✅ Session decoded from database");
+  } catch (err) {
+    console.error("❌ Error fetching session:", err);
+    process.exit(1);
+  }
 
   const sock = makeWASocket({
     version,
@@ -107,9 +118,9 @@ async function startBot() {
     const { connection, lastDisconnect } = update;
     if (connection === 'connecting') console.log('🔌 Connecting...');
     if (connection === 'open') {
-      console.log('✅ Connected using hardcoded session');
+      console.log('✅ Connected using DB session');
       retryCount = 0;
-      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with hardcoded session!' });
+      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with DB session!' });
       pushToGitHub('🤖 Bot connected');
     }
     if (connection === 'close') {
@@ -133,7 +144,7 @@ async function startBot() {
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
     if (text === ".ping") {
-      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with hardcoded session." });
+      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with DB session." });
       return;
     }
   });
