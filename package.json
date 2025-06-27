@@ -5,13 +5,13 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "pairing": "node pairing-server.js"
+    "pairing": "node pairing-server.js",
+    "deploy": "git pull && npm install && node index.js"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.7.1",
     "cors": "^2.8.5",
-    "crypto": "^1.0.1",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "pino": "^8.0.0",
