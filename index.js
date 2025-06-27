@@ -3,13 +3,12 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
-const { Client } = require('pg');
 const cors = require('cors');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
 const { Boom } = require('@hapi/boom');
 const makeWASocket = require('@whiskeysockets/baileys').default;
-const { makeCacheableSignalKeyStore, fetchLatestBaileysVersion, BufferJSON } = require('@whiskeysockets/baileys');
+const { makeCacheableSignalKeyStore, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 
 const app = express();
 app.use(cors());
@@ -20,18 +19,6 @@ const GITHUB_REPO = 'https://github.com/Frost-bit-star/Whatsapp-storage.git';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const centralBusinessNumber = process.env.BUSINESS_NUMBER || '255776822641';
 const LOCAL_REPO_PATH = path.join(__dirname, 'repo-data');
-
-// === PostgreSQL setup ===
-const pgClient = new Client({
-  host: 'db.production.internal',
-  port: 5432,
-  user: 'prod_user',
-  password: 'P@ssw0rd123!',
-  database: 'postgres' // replace with your db name if different
-});
-pgClient.connect()
-  .then(() => console.log("✅ PostgreSQL connected"))
-  .catch(err => console.error("❌ PostgreSQL connection error:", err.stack));
 
 // === GitHub Sync Functions ===
 function runGit(cmd, cwd = LOCAL_REPO_PATH) {
@@ -82,8 +69,20 @@ const db = new sqlite3.Database(dbPath, err => {
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE, apiKey TEXT)`);
   db.run(`CREATE TABLE IF NOT EXISTS verification_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, code TEXT, created_at INTEGER)`);
-  db.run(`CREATE TABLE IF NOT EXISTS pairing_codes (code TEXT PRIMARY KEY, created_at INTEGER, verified INTEGER DEFAULT 0)`);
 });
+
+// === Middleware to validate API Key in headers ===
+async function validateApiKey(req, res, next) {
+  const apiKey = req.headers['x-api-key'];
+  if (!apiKey) return res.status(401).json({ error: 'API key required in x-api-key header' });
+  
+  db.get('SELECT * FROM users WHERE apiKey = ?', [apiKey], (err, row) => {
+    if (err) return res.status(500).json({ error: 'DB error' });
+    if (!row) return res.status(403).json({ error: 'Invalid API key' });
+    req.user = row; // attach user info to request
+    next();
+  });
+}
 
 let retryCount = 0;
 const MAX_RETRIES = 5;
@@ -91,25 +90,61 @@ const MAX_RETRIES = 5;
 async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
-  // === Fetch session from PostgreSQL ===
-  let decoded;
-  try {
-    const result = await pgClient.query('SELECT session_data FROM whatsapp_sessions WHERE id = $1', [1]); // adjust your table and id
-    if (result.rows.length === 0) {
-      console.error('❌ No session found in database.');
-      process.exit(1);
+  // === Your hardcoded session with your number +255776822641 ===
+  const session = {
+    "creds": {
+      "noiseKey": {
+        "private": "iYw0yMEPG6j06Y4QSY48iCHfV+jSz6aZc2r3bE2MrXI=",
+        "public": "hZHm9WYn3crwIB+4n4xf8v0fIptKUsLDnfx8bwYotB4="
+      },
+      "signedIdentityKey": {
+        "private": "iBDoYlNq3mtWmj7rj9pXsEcBllhZH9U5eUdB7+ftYl8=",
+        "public": "2l3B2yV50Xflqpug3PfKeWW8UpjISfO2n3mWyBdrTTo="
+      },
+      "signedPreKey": {
+        "keyId": 1,
+        "public": "4OjvUb7wyfA7O0SS+kv1PWB1QGEr3Wgq+vjo19RJ3H8=",
+        "signature": "txFvTtXl7A8rWfA4+39Y3eA/52d8EtkHeIbq+j5Zzq/ILtnoVvS0Vo4fx2hHPz9clT7mruVL6LoRhg0JDo1uDw=="
+      },
+      "registrationId": 17034,
+      "advSecretKey": "Ef1v3hgkH8xDsyhiPZ9vSvWSMfqLZmtJHL+e0B5yi+0=",
+      "nextPreKeyId": 2,
+      "firstUnuploadedPreKeyId": 2,
+      "account": {
+        "details": "CPTblJYGEJy8zKIGGAM=",
+        "accountSignatureKey": "T3NWit9E1nQX0TrbPydGTNPF1Hqtba3UyDlmoDwXb3g=",
+        "accountSignature": "f1hHTu8eJ1b1HLRKwYzMKUGNEObU1YoWJGytJKnPIvdHpAly2Z/H24zONhsHu9zK/wY5H65N9ZvdXdpKkX31Ag==",
+        "deviceSignature": "JkLTk88IIdLMK1+CHZ9yVyWqX6oQ7iPrX9quVCXJ1FTa5QiZ63qSFiDoCGw9sVQHRlqV47iUlNnv7Y0mvMVuAg=="
+      },
+      "me": {
+        "id": "255776822641@s.whatsapp.net",
+        "verifiedName": "",
+        "name": "WhatsApp Bot"
+      },
+      "signalIdentities": [
+        {
+          "identifier": {
+            "name": "255776822641@s.whatsapp.net",
+            "deviceId": 0
+          },
+          "identifierKey": "T3NWit9E1nQX0TrbPydGTNPF1Hqtba3UyDlmoDwXb3g="
+        }
+      ],
+      "lastAccountSyncTimestamp": 1719498399,
+      "myAppStateKeyId": "AAAAAFsz"
+    },
+    "keys": {
+      "preKeys": {
+        "1": "4OjvUb7wyfA7O0SS+kv1PWB1QGEr3Wgq+vjo19RJ3H8="
+      },
+      "sessions": {}
     }
-    const dbSession = result.rows[0].session_data;
-    decoded = BufferJSON.reviver('', JSON.parse(Buffer.from(dbSession.split(';;;')[2], 'base64').toString()));
-    console.log("✅ Session decoded from database");
-  } catch (err) {
-    console.error("❌ Error fetching session:", err);
-    process.exit(1);
-  }
+  };
 
   const sock = makeWASocket({
     version,
-    auth: { creds: decoded.creds, keys: makeCacheableSignalKeyStore(decoded.keys, fs) },
+    auth: { creds: session.creds, keys: makeCacheableSignalKeyStore(session.keys, fs) },
+    browser: ['Safari (Mac)', 'Safari', '20.0.0'], // force Safari header
     printQRInTerminal: false,
     generateHighQualityLinkPreview: true,
   });
@@ -118,9 +153,9 @@ async function startBot() {
     const { connection, lastDisconnect } = update;
     if (connection === 'connecting') console.log('🔌 Connecting...');
     if (connection === 'open') {
-      console.log('✅ Connected using DB session');
+      console.log('✅ Connected using hardcoded session');
       retryCount = 0;
-      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with DB session!' });
+      await sock.sendMessage(`${centralBusinessNumber}@s.whatsapp.net`, { text: '🤖 Bot is online with hardcoded session!' });
       pushToGitHub('🤖 Bot connected');
     }
     if (connection === 'close') {
@@ -144,13 +179,13 @@ async function startBot() {
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
 
     if (text === ".ping") {
-      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with DB session." });
+      sock.sendMessage(msg.key.remoteJid, { text: "✅ Bot is online with hardcoded session." });
       return;
     }
   });
 
-  // === OTP endpoints ===
-  app.post('/request-code', async (req, res) => {
+  // === OTP endpoints with API key validation ===
+  app.post('/request-code', validateApiKey, async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
     const code = crypto.randomInt(1000, 9999).toString();
@@ -164,7 +199,7 @@ async function startBot() {
     }
   });
 
-  app.post('/verify-code', (req, res) => {
+  app.post('/verify-code', validateApiKey, (req, res) => {
     const { phone, code } = req.body;
     const expiry = Date.now() - 5 * 60 * 1000;
     db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
