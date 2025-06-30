@@ -1,9 +1,11 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, proto, getContentType } = require("@whiskeysockets/baileys");
+// index.js
+
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, proto, getContentType, jidDecode } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
-const chalk = require("chalk"); // ✅ Updated for Chalk v4
+const chalk = require("chalk");
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const crypto = require("crypto");
@@ -21,16 +23,14 @@ const backupPath = path.join(__dirname, "backup");
 
 // ✅ Use GITHUB_TOKEN from environment
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const REPO = "Frost-bit-star/Config"; // 🔧 Your private repo
+const REPO = "Frost-bit-star/Config";
 const REPO_URL = `https://${GITHUB_TOKEN}@github.com/${REPO}.git`;
 
-// ✅ Ensure backup directory exists before clone
 if (!fs.existsSync(backupPath)) {
   console.log("Creating backup directory...");
   fs.mkdirSync(backupPath, { recursive: true });
 }
 
-// ✅ Clone repo into backup if not already cloned
 if (!fs.existsSync(path.join(backupPath, ".git"))) {
   console.log("Cloning backup repo...");
   try {
@@ -40,11 +40,7 @@ if (!fs.existsSync(path.join(backupPath, ".git"))) {
   }
 }
 
-const color = (text, c) => {
-  if (!c) return chalk.green(text);
-  if (chalk[c]) return chalk[c](text);
-  return chalk.green(text);
-};
+const color = (text, c) => (chalk[c] ? chalk[c](text) : chalk.green(text));
 
 async function initializeSession() {
   const credsPath = path.join(__dirname, "session", "creds.json");
@@ -69,8 +65,8 @@ function smsg(conn, m) {
     m.chat = m.key.remoteJid;
     m.fromMe = m.key.fromMe;
     m.isGroup = m.chat.endsWith("@g.us");
-    m.sender = conn.decodeJid((m.fromMe && conn.user.id) || m.participant || m.key.participant || m.chat || "");
-    if (m.isGroup) m.participant = conn.decodeJid(m.key.participant) || "";
+    m.sender = jidDecode((m.fromMe && conn.user.id) || m.participant || m.key.participant || m.chat || "") || ((m.fromMe && conn.user.id) || m.participant || m.key.participant || m.chat || "");
+    if (m.isGroup) m.participant = jidDecode(m.key.participant) || m.key.participant || "";
   }
   if (m.message) {
     m.mtype = getContentType(m.message);
@@ -112,22 +108,10 @@ async function startBot() {
 
     if (connection === "close") {
       const reason = new Boom(lastDisconnect?.error)?.output.statusCode;
-      if (reason === DisconnectReason.badSession) {
-        console.log(`Bad Session File, delete creds.json and scan again.`);
-        process.exit();
-      } else if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, DisconnectReason.timedOut].includes(reason)) {
-        console.log("Connection closed/lost/timed out. Reconnecting...");
-        startBot();
-      } else if (reason === DisconnectReason.connectionReplaced) {
-        console.log("Connection replaced by another session. Exiting...");
-        process.exit();
-      } else if (reason === DisconnectReason.loggedOut) {
-        console.log("Logged out. Delete session and scan again.");
-        process.exit();
-      } else {
-        console.log("Unknown disconnect reason:", reason);
-        startBot();
-      }
+      if (reason === DisconnectReason.badSession) process.exit();
+      else if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, DisconnectReason.timedOut].includes(reason)) startBot();
+      else if (reason === DisconnectReason.connectionReplaced || reason === DisconnectReason.loggedOut) process.exit();
+      else startBot();
     } else if (connection === "open") {
       console.log(color("✅ Bot connected successfully!", "green"));
       await client.sendMessage(client.user.id, { text: "Hello, your bot is connected and running!" });
@@ -183,7 +167,8 @@ async function startBot() {
     });
   }
 
-  app.post('/request-code', validateApiKey, async (req, res) => {
+  // ✅ request-code endpoint (no API key)
+  app.post('/request-code', async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
     const code = crypto.randomInt(1000, 9999).toString();
@@ -197,7 +182,8 @@ async function startBot() {
     }
   });
 
-  app.post('/verify-code', validateApiKey, (req, res) => {
+  // ✅ verify-code endpoint (no API key)
+  app.post('/verify-code', (req, res) => {
     const { phone, code } = req.body;
     const expiry = Date.now() - 5 * 60 * 1000;
     db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
@@ -225,7 +211,6 @@ async function startBot() {
     console.log(`Express server running on port ${PORT}`);
   });
 
-  // Initialize git sync
   gitInit();
   setInterval(() => {
     copyFiles();
