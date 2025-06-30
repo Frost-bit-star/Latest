@@ -19,6 +19,11 @@ const PORT = process.env.PORT || 3000;
 const sessionName = "session";
 const backupPath = path.join(__dirname, "backup");
 
+// ✅ Use GITHUB_TOKEN from environment
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO = "Frost-bit-star/Config"; // 🔧 Your private repo
+const REPO_URL = `https://${GITHUB_TOKEN}@github.com/${REPO}.git`;
+
 // ✅ Ensure backup directory exists before clone
 if (!fs.existsSync(backupPath)) {
   console.log("Creating backup directory...");
@@ -29,9 +34,9 @@ if (!fs.existsSync(backupPath)) {
 if (!fs.existsSync(path.join(backupPath, ".git"))) {
   console.log("Cloning backup repo...");
   try {
-    execSync(`git clone https://github.com/your/repo.git ${backupPath}`, { stdio: "inherit" });
+    execSync(`git clone ${REPO_URL} ${backupPath}`, { stdio: "inherit" });
   } catch (err) {
-    console.error("Git clone failed:", err);
+    console.error("Git clone failed:", err.message);
   }
 }
 

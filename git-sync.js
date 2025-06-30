@@ -5,16 +5,20 @@ const fs = require("fs");
 const REPO_DIR = path.resolve(__dirname, "backup");
 const COMMIT_MSG = "Auto backup session & db";
 
-function gitInit() {
-  if (!process.env.GITHUB_REPO) {
-    console.error("❌ GITHUB_REPO environment variable not set.");
-    return;
-  }
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO; // e.g. "Frost-bit-star/Config"
 
+if (!GITHUB_TOKEN || !GITHUB_REPO) {
+  console.error("❌ GITHUB_TOKEN or GITHUB_REPO environment variable not set.");
+}
+
+const REPO_URL = `https://${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git`;
+
+function gitInit() {
   if (!fs.existsSync(REPO_DIR)) {
     console.log("📥 Cloning backup repo...");
     try {
-      execSync(`git clone ${process.env.GITHUB_REPO} ${REPO_DIR}`, { stdio: "inherit" });
+      execSync(`git clone ${REPO_URL} ${REPO_DIR}`, { stdio: "inherit" });
     } catch (cloneErr) {
       console.error("❌ Git clone failed:", cloneErr.message);
     }
@@ -31,6 +35,10 @@ function gitPush() {
     console.log("📤 Pushing backup to GitHub...");
     execSync(`git -C ${REPO_DIR} add .`, { stdio: "inherit" });
     execSync(`git -C ${REPO_DIR} commit -m "${COMMIT_MSG}"`, { stdio: "inherit" });
+
+    // ✅ Set push URL to include token if not already set
+    execSync(`git -C ${REPO_DIR} remote set-url origin ${REPO_URL}`, { stdio: "inherit" });
+
     execSync(`git -C ${REPO_DIR} push`, { stdio: "inherit" });
     console.log("✅ Backup pushed to GitHub");
   } catch (e) {
