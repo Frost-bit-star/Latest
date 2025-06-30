@@ -1,14 +1,17 @@
 // index.js
 
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadContentFromMessage, jidDecode, proto, getContentType } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, proto, getContentType } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
-const chalk = require("chalk");
+const chalkModule = require("chalk");
+const chalk = new chalkModule.Instance(); // ✅ ensures chalk.green works with Chalk v5
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const crypto = require("crypto");
+const { execSync } = require("child_process");
+
 const { gitInit, gitPush, copyFiles } = require("./git-sync");
 const { session } = require("./settings");
 
@@ -17,6 +20,23 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const sessionName = "session";
+const backupPath = path.join(__dirname, "backup");
+
+// ✅ Ensure backup directory exists before clone
+if (!fs.existsSync(backupPath)) {
+  console.log("Creating backup directory...");
+  fs.mkdirSync(backupPath, { recursive: true });
+}
+
+// ✅ Clone repo into backup if not already cloned
+if (!fs.existsSync(path.join(backupPath, ".git"))) {
+  console.log("Cloning backup repo...");
+  try {
+    execSync(`git clone https://github.com/your/repo.git ${backupPath}`, { stdio: "inherit" });
+  } catch (err) {
+    console.error("Git clone failed:", err);
+  }
+}
 
 const color = (text, c) => {
   if (!c) return chalk.green(text);
@@ -38,10 +58,9 @@ async function initializeSession() {
   }
 }
 
-// Simplified message serializer helper
+// 📝 Message serializer helper
 function smsg(conn, m) {
   if (!m) return m;
-  let M = proto.WebMessageInfo;
   if (m.key) {
     m.id = m.key.id;
     m.isBaileys = m.id.startsWith("BAE5") && m.id.length === 16;
@@ -63,21 +82,11 @@ function smsg(conn, m) {
   return m;
 }
 
-// Open SQLite DB
+// 🗄️ SQLite DB
 const db = new sqlite3.Database(path.join(__dirname, "data.db"));
-
-// Create tables if not exist
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    number TEXT PRIMARY KEY,
-    apiKey TEXT NOT NULL
-  )`);
-
-  db.run(`CREATE TABLE IF NOT EXISTS verification_codes (
-    phone TEXT,
-    code TEXT,
-    created_at INTEGER
-  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS users (number TEXT PRIMARY KEY, apiKey TEXT NOT NULL)`);
+  db.run(`CREATE TABLE IF NOT EXISTS verification_codes (phone TEXT, code TEXT, created_at INTEGER)`);
 });
 
 async function startBot() {
@@ -91,7 +100,6 @@ async function startBot() {
     auth: state
   });
 
-  // QR printing handler
   client.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -126,17 +134,14 @@ async function startBot() {
 
   client.ev.on("creds.update", saveCreds);
 
-  // Message handler
   client.ev.on("messages.upsert", async (chatUpdate) => {
     try {
       const mek = chatUpdate.messages[0];
-      if (!mek.message) return;
-      if (mek.key.fromMe) return; // Ignore own messages
+      if (!mek.message || mek.key.fromMe) return;
       const m = smsg(client, mek);
       const senderNum = m.key.remoteJid.split("@")[0];
       const text = m.body?.toLowerCase() || "";
 
-      // "allow me" to generate api key
       if (text === "allow me") {
         const apiKey = crypto.randomBytes(16).toString("hex");
         db.run('INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)', [senderNum, apiKey]);
@@ -144,7 +149,6 @@ async function startBot() {
         return;
       }
 
-      // recover api key
       if (text === "recover apikey") {
         db.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
           if (row) await client.sendMessage(m.chat, { text: `🔑 Your API key: ${row.apiKey}` });
@@ -153,7 +157,6 @@ async function startBot() {
         return;
       }
 
-      // ping command
       if (text === ".ping") {
         await client.sendMessage(m.chat, { text: "✅ Bot is online with pairing code session." });
         return;
@@ -166,7 +169,6 @@ async function startBot() {
 
   // === Express API endpoints ===
 
-  // API key validation middleware
   function validateApiKey(req, res, next) {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) return res.status(401).json({ error: 'API key required in x-api-key header' });
@@ -179,7 +181,6 @@ async function startBot() {
     });
   }
 
-  // Request OTP code endpoint
   app.post('/request-code', validateApiKey, async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: 'Phone required' });
@@ -194,7 +195,6 @@ async function startBot() {
     }
   });
 
-  // Verify OTP code endpoint
   app.post('/verify-code', validateApiKey, (req, res) => {
     const { phone, code } = req.body;
     const expiry = Date.now() - 5 * 60 * 1000;
@@ -204,7 +204,6 @@ async function startBot() {
     });
   });
 
-  // Self message endpoint
   app.post('/self-message', validateApiKey, async (req, res) => {
     const { number, message } = req.body;
     if (!number || !message) return res.status(400).json({ error: 'Number and message required' });
@@ -216,7 +215,6 @@ async function startBot() {
     }
   });
 
-  // Start Express server
   app.get("/", (req, res) => {
     res.send("Baileys WhatsApp Bot is running!");
   });
@@ -230,7 +228,7 @@ async function startBot() {
   setInterval(() => {
     copyFiles();
     gitPush();
-  }, 2 * 60 * 1000); // every 2 minutes
+  }, 2 * 60 * 1000);
 }
 
 startBot();
