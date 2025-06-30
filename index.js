@@ -1,12 +1,9 @@
-// index.js
-
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, proto, getContentType } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
-const chalkModule = require("chalk");
-const chalk = new chalkModule.Instance(); // ✅ ensures chalk.green works with Chalk v5
+const chalk = require("chalk"); // ✅ Updated for Chalk v4
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const crypto = require("crypto");
