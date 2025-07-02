@@ -19,6 +19,11 @@ function gitInit() {
     console.log("📥 Cloning backup repo...");
     try {
       execSync(`git clone ${REPO_URL} ${REPO_DIR}`, { stdio: "inherit" });
+
+      // ✅ Set Git username and email after cloning
+      execSync(`git -C ${REPO_DIR} config user.name "Frost-bit-star"`, { stdio: "inherit" });
+      execSync(`git -C ${REPO_DIR} config user.email "morganmilstone983@gmail.com"`, { stdio: "inherit" });
+
     } catch (cloneErr) {
       console.error("❌ Git clone failed:", cloneErr.message);
     }
@@ -32,6 +37,10 @@ function gitInit() {
 
 function gitPush() {
   try {
+    // ✅ Ensure Git username and email are set before commit
+    execSync(`git -C ${REPO_DIR} config user.name "Frost-bit-star"`, { stdio: "inherit" });
+    execSync(`git -C ${REPO_DIR} config user.email "morganmilstone983@gmail.com"`, { stdio: "inherit" });
+
     console.log("📤 Pushing backup to GitHub...");
     execSync(`git -C ${REPO_DIR} add .`, { stdio: "inherit" });
     execSync(`git -C ${REPO_DIR} commit -m "${COMMIT_MSG}"`, { stdio: "inherit" });
