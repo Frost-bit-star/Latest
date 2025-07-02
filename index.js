@@ -7,6 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const chalk = require("chalk");
 const express = require("express");
+const cors = require("cors"); // <-- added
 const sqlite3 = require("sqlite3").verbose();
 const crypto = require("crypto");
 const { execSync } = require("child_process");
@@ -16,6 +17,7 @@ const { session } = require("./settings");
 const { fetchStackVerifyAI } = require("./chatgpt");
 
 const app = express();
+app.use(cors()); // <-- added
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -60,12 +62,10 @@ async function initializeSession() {
 function generateUniqueApiKey() {
   return new Promise((resolve, reject) => {
     function tryGenerate() {
-      // 5 digit numeric string (10000 to 99999)
       const candidate = (Math.floor(10000 + Math.random() * 90000)).toString();
       db.get('SELECT apiKey FROM users WHERE apiKey = ?', [candidate], (err, row) => {
         if (err) return reject(err);
         if (row) {
-          // duplicate found, try again
           tryGenerate();
         } else {
           resolve(candidate);
@@ -149,10 +149,8 @@ async function startBot() {
       const text = m.body?.toLowerCase() || "";
 
       if (text === "allow me") {
-        // Generate unique 5-digit numeric API key
         const apiKey = await generateUniqueApiKey();
 
-        // Save to DB
         db.run('INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)', [senderNum, apiKey], async (err) => {
           if (err) {
             console.error("DB insert error:", err);
@@ -160,7 +158,6 @@ async function startBot() {
             return;
           }
 
-          // Push to GitHub backup immediately
           try {
             copyFiles();
             await gitPush();
@@ -175,14 +172,12 @@ async function startBot() {
       }
 
       if (text === "recover apikey") {
-        // Pull latest backup from GitHub before reading DB
         try {
           await gitPull();
         } catch (e) {
           console.error("Git pull failed:", e);
         }
 
-        // Reload DB after pulling (close and reopen)
         db.close(() => {
           const reopenedDb = new sqlite3.Database(path.join(__dirname, "data.db"));
           reopenedDb.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
@@ -203,7 +198,6 @@ async function startBot() {
         return;
       }
 
-      // Fallback to AI for any other messages
       const aiReply = await fetchStackVerifyAI(m.body);
       await client.sendMessage(m.chat, { text: aiReply });
 
@@ -211,8 +205,6 @@ async function startBot() {
       console.log("❌ Message error:", err);
     }
   });
-
-  // Express API and other endpoints remain unchanged...
 
   function validateApiKey(req, res, next) {
     const apiKey = req.headers["x-api-key"];
