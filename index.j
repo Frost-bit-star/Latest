@@ -11,9 +11,8 @@ const sqlite3 = require("sqlite3").verbose();
 const crypto = require("crypto");
 const { execSync } = require("child_process");
 
-const { gitInit, gitPush, copyFiles, gitPull } = require("./git-sync"); // <-- add gitPull to sync from GitHub
+const { gitInit, gitPush, copyFiles } = require("./git-sync");
 const { session } = require("./settings");
-const { fetchStackVerifyAI } = require("./chatgpt");
 
 const app = express();
 app.use(express.json());
@@ -22,6 +21,7 @@ const PORT = process.env.PORT || 3000;
 const sessionName = "session";
 const backupPath = path.join(__dirname, "backup");
 
+// ✅ Use GITHUB_TOKEN from environment
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO = "Frost-bit-star/Config";
 const REPO_URL = `https://${GITHUB_TOKEN}@github.com/${REPO}.git`;
@@ -56,27 +56,7 @@ async function initializeSession() {
   }
 }
 
-// Helper: generate unique numeric API key of at least 5 digits, check DB for duplicates
-function generateUniqueApiKey() {
-  return new Promise((resolve, reject) => {
-    function tryGenerate() {
-      // 5 digit numeric string (10000 to 99999)
-      const candidate = (Math.floor(10000 + Math.random() * 90000)).toString();
-      db.get('SELECT apiKey FROM users WHERE apiKey = ?', [candidate], (err, row) => {
-        if (err) return reject(err);
-        if (row) {
-          // duplicate found, try again
-          tryGenerate();
-        } else {
-          resolve(candidate);
-        }
-      });
-    }
-    tryGenerate();
-  });
-}
-
-// Message serializer helper (unchanged)
+// 📝 Message serializer helper
 function smsg(conn, m) {
   if (!m) return m;
   if (m.key) {
@@ -100,10 +80,10 @@ function smsg(conn, m) {
   return m;
 }
 
-// SQLite DB
+// 🗄️ SQLite DB
 const db = new sqlite3.Database(path.join(__dirname, "data.db"));
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (number TEXT PRIMARY KEY, apiKey TEXT NOT NULL UNIQUE)`);
+  db.run(`CREATE TABLE IF NOT EXISTS users (number TEXT PRIMARY KEY, apiKey TEXT NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS verification_codes (phone TEXT, code TEXT, created_at INTEGER)`);
 });
 
@@ -115,7 +95,7 @@ async function startBot() {
   const client = makeWASocket({
     logger: pino({ level: "silent" }),
     browser: ["Bot", "Chrome", "1.0.0"],
-    auth: state,
+    auth: state
   });
 
   client.ev.on("connection.update", async (update) => {
@@ -149,52 +129,17 @@ async function startBot() {
       const text = m.body?.toLowerCase() || "";
 
       if (text === "allow me") {
-        // Generate unique 5-digit numeric API key
-        const apiKey = await generateUniqueApiKey();
-
-        // Save to DB
-        db.run('INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)', [senderNum, apiKey], async (err) => {
-          if (err) {
-            console.error("DB insert error:", err);
-            await client.sendMessage(m.chat, { text: "❌ Error generating your API key. Try again later." });
-            return;
-          }
-
-          // Push to GitHub backup immediately
-          try {
-            copyFiles();
-            await gitPush();
-          } catch (e) {
-            console.error("Git push failed:", e);
-          }
-
-          await client.sendMessage(m.chat, { text: `✅ Access granted. Your numeric API key:\n${apiKey}` });
-        });
-
+        const apiKey = crypto.randomBytes(16).toString("hex");
+        db.run('INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)', [senderNum, apiKey]);
+        await client.sendMessage(m.chat, { text: `✅ Access granted. Your API key:\n${apiKey}` });
         return;
       }
 
       if (text === "recover apikey") {
-        // Pull latest backup from GitHub before reading DB
-        try {
-          await gitPull();
-        } catch (e) {
-          console.error("Git pull failed:", e);
-        }
-
-        // Reload DB after pulling (close and reopen)
-        db.close(() => {
-          const reopenedDb = new sqlite3.Database(path.join(__dirname, "data.db"));
-          reopenedDb.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
-            if (row) {
-              await client.sendMessage(m.chat, { text: `🔑 Your API key: ${row.apiKey}` });
-            } else {
-              await client.sendMessage(m.chat, { text: "❌ No API key found. Use 'allow me' first." });
-            }
-            reopenedDb.close();
-          });
+        db.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
+          if (row) await client.sendMessage(m.chat, { text: `🔑 Your API key: ${row.apiKey}` });
+          else await client.sendMessage(m.chat, { text: "❌ No API key found. Use 'allow me' first." });
         });
-
         return;
       }
 
@@ -203,44 +148,42 @@ async function startBot() {
         return;
       }
 
-      // Fallback to AI for any other messages
-      const aiReply = await fetchStackVerifyAI(m.body);
-      await client.sendMessage(m.chat, { text: aiReply });
-
     } catch (err) {
       console.log("❌ Message error:", err);
     }
   });
 
-  // Express API and other endpoints remain unchanged...
+  // === Express API endpoints ===
 
   function validateApiKey(req, res, next) {
-    const apiKey = req.headers["x-api-key"];
-    if (!apiKey) return res.status(401).json({ error: "API key required in x-api-key header" });
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey) return res.status(401).json({ error: 'API key required in x-api-key header' });
 
-    db.get("SELECT * FROM users WHERE apiKey = ?", [apiKey], (err, row) => {
-      if (err) return res.status(500).json({ error: "DB error" });
-      if (!row) return res.status(403).json({ error: "Invalid API key" });
+    db.get('SELECT * FROM users WHERE apiKey = ?', [apiKey], (err, row) => {
+      if (err) return res.status(500).json({ error: 'DB error' });
+      if (!row) return res.status(403).json({ error: 'Invalid API key' });
       req.user = row;
       next();
     });
   }
 
-  app.post("/request-code", async (req, res) => {
+  // ✅ request-code endpoint (no API key)
+  app.post('/request-code', async (req, res) => {
     const { phone } = req.body;
-    if (!phone) return res.status(400).json({ message: "Phone required" });
+    if (!phone) return res.status(400).json({ message: 'Phone required' });
     const code = crypto.randomInt(1000, 9999).toString();
     const createdAt = Date.now();
     db.run(`INSERT INTO verification_codes (phone, code, created_at) VALUES (?, ?, ?)`, [phone, code, createdAt]);
     try {
       await client.sendMessage(`${phone}@s.whatsapp.net`, { text: `${code} is your verification code.` });
-      res.json({ message: "OTP sent" });
+      res.json({ message: 'OTP sent' });
     } catch {
-      res.status(500).json({ message: "Failed to send OTP" });
+      res.status(500).json({ message: 'Failed to send OTP' });
     }
   });
 
-  app.post("/verify-code", (req, res) => {
+  // ✅ verify-code endpoint (no API key)
+  app.post('/verify-code', (req, res) => {
     const { phone, code } = req.body;
     const expiry = Date.now() - 5 * 60 * 1000;
     db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
@@ -249,14 +192,14 @@ async function startBot() {
     });
   });
 
-  app.post("/self-message", validateApiKey, async (req, res) => {
+  app.post('/self-message', validateApiKey, async (req, res) => {
     const { number, message } = req.body;
-    if (!number || !message) return res.status(400).json({ error: "Number and message required" });
+    if (!number || !message) return res.status(400).json({ error: 'Number and message required' });
     try {
       await client.sendMessage(`${number}@s.whatsapp.net`, { text: `From ${req.user.number} (${req.user.apiKey}):\n${message}` });
       res.json({ sent: true });
     } catch (err) {
-      res.status(500).json({ error: "Failed to send message" });
+      res.status(500).json({ error: 'Failed to send message' });
     }
   });
 
