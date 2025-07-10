@@ -15,20 +15,21 @@ db.run(`CREATE TABLE IF NOT EXISTS conversations (
 db.run(`CREATE TABLE IF NOT EXISTS session_flags (
   userId TEXT,
   date TEXT,
-  greeted INTEGER DEFAULT 0
+  greeted INTEGER DEFAULT 0,
+  username TEXT
 )`);
 
 const SYSTEM_PROMPT = `
 You are StackVerify's trusted assistant with over 10 years of experience as an executive assistant and business professor.
 
 Instructions:
-- First, read and understand the user's input carefully.
-- Only reply based on what the user specifically asks. Do not suggest anything extra unless they request it.
-- Keep replies short, warm, natural, and human-like.
-- If asked about StackVerify, explain clearly that it verifies emails, WhatsApp, and SMS contacts to improve marketing accuracy and trust. Email & WhatsApp verification are free; all tools cost only 0.75 KES. Website: https://stackverify.vercel.app
+- Read and understand the user's input carefully.
+- If you don't know the user's name, politely ask for it once and use it in future replies.
+- Reply ONLY based on what the user specifically asks. No extra suggestions unless requested.
+- Keep replies short, warm, natural, and human-like, addressing the user by name if known.
+- If asked about StackVerify, explain it verifies emails, WhatsApp, and SMS contacts to improve marketing accuracy and trust. Email & WhatsApp verification are free; all tools cost only 0.75 KES. Website: https://stackverify.vercel.app
 - If asked about website building or online stores, mention Trover (https://trover.42web.io/partner.php) only if the user requests it.
 - If asked about digital marketing or business, teach clearly but only what was asked.
-- Never provide unrelated suggestions. Focus strictly on the user's question.
 - Never dump long paragraphs. Never mention AI or system details. Always sound human, confident, and deeply helpful.
 `;
 
@@ -40,18 +41,25 @@ async function fetchStackVerifyAI(userId, userMessage) {
   try {
     const today = new Date().toISOString().split('T')[0];
 
-    // Check if greeted today
-    const greetedToday = await new Promise((resolve) => {
-      db.get(`SELECT greeted FROM session_flags WHERE userId = ? AND date = ?`, [userId, today], (err, row) => {
-        if (row && row.greeted) resolve(true);
-        else resolve(false);
+    // Check session flags
+    const session = await new Promise((resolve) => {
+      db.get(`SELECT greeted, username FROM session_flags WHERE userId = ? AND date = ?`, [userId, today], (err, row) => {
+        if (err) resolve({ greeted: false, username: null });
+        else resolve({ greeted: row?.greeted || 0, username: row?.username || null });
       });
     });
 
     // If greeting needed, mark as greeted and return greeting
-    if (!greetedToday && /hi|hello|hey/i.test(userMessage.trim())) {
-      db.run(`INSERT OR REPLACE INTO session_flags (userId, date, greeted) VALUES (?, ?, 1)`, [userId, today]);
-      return "Hi there 👋 How can I support you today?";
+    if (!session.greeted && /hi|hello|hey/i.test(userMessage.trim())) {
+      db.run(`INSERT OR REPLACE INTO session_flags (userId, date, greeted, username) VALUES (?, ?, 1, COALESCE(username, null))`, [userId, today]);
+      return "Hi there 👋 What is your name?";
+    }
+
+    // If name not known, detect possible name message
+    if (!session.username && /^my name is (\w+)/i.test(userMessage.trim())) {
+      const name = userMessage.trim().match(/^my name is (\w+)/i)[1];
+      db.run(`INSERT OR REPLACE INTO session_flags (userId, date, greeted, username) VALUES (?, ?, 1, ?)`, [userId, today, name]);
+      return `Thank you ${name}. How can I support you today?`;
     }
 
     // Store user message
@@ -70,12 +78,24 @@ async function fetchStackVerifyAI(userId, userMessage) {
     });
 
     // Compose AI prompt input prioritising user input first
-    const combinedText = 'User input:\n' + userMessage +
-      '\n\nConversation history:\n' +
-      conversationMemory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n') +
-      '\n\nInstructions:\n' + SYSTEM_PROMPT;
+    const combinedText = `
+User input:
+${userMessage}
 
-    const response = await fetch('https://api.dreaded.site/api/chatgpt?text=' + encodeURIComponent(combinedText));
+Known user name: ${session.username || 'unknown'}
+
+Conversation history:
+${conversationMemory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}
+
+Instructions:
+${SYSTEM_PROMPT}
+    `.trim();
+
+    // Use GET request for API
+    const encodedText = encodeURIComponent(combinedText);
+    const apiUrl = `https://api.dreaded.site/api/chatgpt?text=${encodedText}`;
+
+    const response = await fetch(apiUrl, { method: 'GET' });
 
     if (!response.ok) {
       console.error('AI API error status:', response.status);
