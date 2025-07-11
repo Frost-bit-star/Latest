@@ -20,10 +20,15 @@ async function fetchStackVerifyAI(userId, userMessage) {
   const flirtyFallback = "🥺 Hang on… my brain is having a cute jam 🧠✨ Kindly visit https://stackverify.vercel.app for more details as I fix myself to impress you soon 💖";
 
   try {
+    if (!userMessage || typeof userMessage !== 'string') {
+      console.error('❌ Invalid userMessage input:', userMessage);
+      return flirtyFallback;
+    }
+
     // Get or initialize username
     let username = users.get(userId) || 'unknown';
 
-    // Detect name input
+    // Detect name input safely
     const nameMatch = userMessage.trim().match(/my name is ([\w\s]+)/i);
     if (!users.get(userId) && nameMatch) {
       username = nameMatch[1].trim();
