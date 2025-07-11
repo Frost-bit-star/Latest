@@ -28,11 +28,13 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO = "Frost-bit-star/Config";
 const REPO_URL = `https://${GITHUB_TOKEN}@github.com/${REPO}.git`;
 
+// Ensure backup directory exists
 if (!fs.existsSync(backupPath)) {
   console.log("Creating backup directory...");
   fs.mkdirSync(backupPath, { recursive: true });
 }
 
+// Clone backup repo if not already cloned
 if (!fs.existsSync(path.join(backupPath, ".git"))) {
   console.log("Cloning backup repo...");
   try {
@@ -42,6 +44,16 @@ if (!fs.existsSync(path.join(backupPath, ".git"))) {
   }
 }
 
+// Pull latest backup to restore DB before startup
+(async () => {
+  try {
+    await gitPull();
+    console.log("✅ Pulled latest backup before server start.");
+  } catch (e) {
+    console.error("Git pull failed on startup:", e);
+  }
+})();
+
 const color = (text, c) => (chalk[c] ? chalk[c](text) : chalk.green(text));
 
 async function initializeSession() {
@@ -49,7 +61,7 @@ async function initializeSession() {
   try {
     const decoded = Buffer.from(session, "base64").toString("utf-8");
     if (!fs.existsSync(credsPath) || session !== "zokk") {
-      console.log("📡 connecting...");
+      console.log("📡 Connecting...");
       fs.mkdirSync(path.dirname(credsPath), { recursive: true });
       fs.writeFileSync(credsPath, decoded, "utf8");
     }
@@ -58,7 +70,14 @@ async function initializeSession() {
   }
 }
 
-// Helper: generate unique numeric API key of at least 5 digits, check DB for duplicates
+// SQLite DB initialization
+const db = new sqlite3.Database(path.join(__dirname, "data.db"));
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (number TEXT PRIMARY KEY, apiKey TEXT NOT NULL UNIQUE)`);
+  db.run(`CREATE TABLE IF NOT EXISTS verification_codes (phone TEXT, code TEXT, created_at INTEGER)`);
+});
+
+// Generate unique numeric API key
 function generateUniqueApiKey() {
   return new Promise((resolve, reject) => {
     function tryGenerate() {
@@ -76,7 +95,7 @@ function generateUniqueApiKey() {
   });
 }
 
-// Message serializer helper (unchanged)
+// Message serializer helper
 function smsg(conn, m) {
   if (!m) return m;
   if (m.key) {
@@ -99,13 +118,6 @@ function smsg(conn, m) {
     conn.sendMessage(chatId, { text, ...options }, { quoted: m });
   return m;
 }
-
-// SQLite DB
-const db = new sqlite3.Database(path.join(__dirname, "data.db"));
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (number TEXT PRIMARY KEY, apiKey TEXT NOT NULL UNIQUE)`);
-  db.run(`CREATE TABLE IF NOT EXISTS verification_codes (phone TEXT, code TEXT, created_at INTEGER)`);
-});
 
 async function startBot() {
   await initializeSession();
@@ -130,7 +142,7 @@ async function startBot() {
       const reason = new Boom(lastDisconnect?.error)?.output.statusCode;
       if (reason === DisconnectReason.badSession) process.exit();
       else if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, DisconnectReason.timedOut].includes(reason)) startBot();
-      else if (reason === DisconnectReason.connectionReplaced || reason === DisconnectReason.loggedOut) process.exit();
+      else if ([DisconnectReason.connectionReplaced, DisconnectReason.loggedOut].includes(reason)) process.exit();
       else startBot();
     } else if (connection === "open") {
       console.log(color("✅ Bot connected successfully!", "green"));
@@ -148,6 +160,7 @@ async function startBot() {
       const senderNum = m.key.remoteJid.split("@")[0];
       const text = m.body?.toLowerCase() || "";
 
+      // API key registration
       if (text === "allow me") {
         db.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
           if (row) {
@@ -173,6 +186,7 @@ async function startBot() {
         return;
       }
 
+      // API key recovery
       if (text === "recover apikey") {
         try {
           await gitPull();
@@ -189,12 +203,14 @@ async function startBot() {
         return;
       }
 
+      // Bot ping check
       if (text === ".ping") {
         await client.sendMessage(m.chat, { text: "✅ Bot is online with pairing code session." });
         return;
       }
 
-      const aiReply = await fetchStackVerifyAI(m.body);
+      // AI assistant reply
+      const aiReply = await fetchStackVerifyAI(senderNum, m.body);
       await client.sendMessage(m.chat, { text: aiReply });
 
     } catch (err) {
@@ -202,6 +218,7 @@ async function startBot() {
     }
   });
 
+  // Express API key validator
   function validateApiKey(req, res, next) {
     const apiKey = req.headers["x-api-key"];
     if (!apiKey) return res.status(401).json({ error: "API key required in x-api-key header" });
@@ -213,6 +230,7 @@ async function startBot() {
     });
   }
 
+  // OTP endpoints
   app.post("/request-code", async (req, res) => {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ message: "Phone required" });
@@ -236,6 +254,7 @@ async function startBot() {
     });
   });
 
+  // Self message endpoint
   app.post("/self-message", validateApiKey, async (req, res) => {
     const { number, message } = req.body;
     if (!number || !message) return res.status(400).json({ error: "Number and message required" });
@@ -247,7 +266,7 @@ async function startBot() {
     }
   });
 
-  // 🆕 BULK MESSAGE ENDPOINT WITH TEMPLATE SUPPORT
+  // Bulk message endpoint
   app.post("/bulk-message", validateApiKey, async (req, res) => {
     const { numbers, template } = req.body;
     if (!numbers || !Array.isArray(numbers) || numbers.length === 0 || !template) {
@@ -275,6 +294,7 @@ async function startBot() {
     console.log(`Express server running on port ${PORT}`);
   });
 
+  // Git initialization and periodic backup push
   gitInit();
   setInterval(() => {
     copyFiles();
