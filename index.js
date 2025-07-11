@@ -7,17 +7,17 @@ const fs = require("fs");
 const path = require("path");
 const chalk = require("chalk");
 const express = require("express");
-const cors = require("cors"); // <-- added
+const cors = require("cors");
 const sqlite3 = require("sqlite3").verbose();
 const crypto = require("crypto");
 const { execSync } = require("child_process");
 
-const { gitInit, gitPush, copyFiles, gitPull } = require("./git-sync"); // <-- add gitPull to sync from GitHub
+const { gitInit, gitPush, copyFiles, gitPull } = require("./git-sync");
 const { session } = require("./settings");
 const { fetchStackVerifyAI } = require("./chatgpt");
 
 const app = express();
-app.use(cors()); // <-- added
+app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -149,25 +149,27 @@ async function startBot() {
       const text = m.body?.toLowerCase() || "";
 
       if (text === "allow me") {
-        const apiKey = await generateUniqueApiKey();
-
-        db.run('INSERT OR REPLACE INTO users (number, apiKey) VALUES (?, ?)', [senderNum, apiKey], async (err) => {
-          if (err) {
-            console.error("DB insert error:", err);
-            await client.sendMessage(m.chat, { text: "❌ Error generating your API key. Try again later." });
-            return;
+        db.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
+          if (row) {
+            await client.sendMessage(m.chat, { text: `✅ You already have an API key:\n${row.apiKey}` });
+          } else {
+            const apiKey = await generateUniqueApiKey();
+            db.run('INSERT INTO users (number, apiKey) VALUES (?, ?)', [senderNum, apiKey], async (err) => {
+              if (err) {
+                console.error("DB insert error:", err);
+                await client.sendMessage(m.chat, { text: "❌ Error generating your API key. Try again later." });
+                return;
+              }
+              try {
+                copyFiles();
+                await gitPush();
+              } catch (e) {
+                console.error("Git push failed:", e);
+              }
+              await client.sendMessage(m.chat, { text: `✅ Access granted. Your numeric API key:\n${apiKey}` });
+            });
           }
-
-          try {
-            copyFiles();
-            await gitPush();
-          } catch (e) {
-            console.error("Git push failed:", e);
-          }
-
-          await client.sendMessage(m.chat, { text: `✅ Access granted. Your numeric API key:\n${apiKey}` });
         });
-
         return;
       }
 
@@ -177,19 +179,13 @@ async function startBot() {
         } catch (e) {
           console.error("Git pull failed:", e);
         }
-
-        db.close(() => {
-          const reopenedDb = new sqlite3.Database(path.join(__dirname, "data.db"));
-          reopenedDb.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
-            if (row) {
-              await client.sendMessage(m.chat, { text: `🔑 Your API key: ${row.apiKey}` });
-            } else {
-              await client.sendMessage(m.chat, { text: "❌ No API key found. Use 'allow me' first." });
-            }
-            reopenedDb.close();
-          });
+        db.get('SELECT apiKey FROM users WHERE number = ?', [senderNum], async (err, row) => {
+          if (row) {
+            await client.sendMessage(m.chat, { text: `🔑 Your API key: ${row.apiKey}` });
+          } else {
+            await client.sendMessage(m.chat, { text: "❌ No API key found. Use 'allow me' first." });
+          }
         });
-
         return;
       }
 
@@ -209,7 +205,6 @@ async function startBot() {
   function validateApiKey(req, res, next) {
     const apiKey = req.headers["x-api-key"];
     if (!apiKey) return res.status(401).json({ error: "API key required in x-api-key header" });
-
     db.get("SELECT * FROM users WHERE apiKey = ?", [apiKey], (err, row) => {
       if (err) return res.status(500).json({ error: "DB error" });
       if (!row) return res.status(403).json({ error: "Invalid API key" });
@@ -250,6 +245,26 @@ async function startBot() {
     } catch (err) {
       res.status(500).json({ error: "Failed to send message" });
     }
+  });
+
+  // 🆕 BULK MESSAGE ENDPOINT WITH TEMPLATE SUPPORT
+  app.post("/bulk-message", validateApiKey, async (req, res) => {
+    const { numbers, template } = req.body;
+    if (!numbers || !Array.isArray(numbers) || numbers.length === 0 || !template) {
+      return res.status(400).json({ error: "Numbers (array) and template required" });
+    }
+    const results = [];
+    for (const number of numbers) {
+      try {
+        const message = template.replace("{number}", number).replace("{sender}", req.user.number);
+        await client.sendMessage(`${number}@s.whatsapp.net`, { text: message });
+        results.push({ number, status: "sent" });
+      } catch (err) {
+        console.error(`Failed to send to ${number}:`, err);
+        results.push({ number, status: "failed", error: err.message });
+      }
+    }
+    res.json({ results });
   });
 
   app.get("/", (req, res) => {

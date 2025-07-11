@@ -29,9 +29,9 @@ async function fetchStackVerifyAI(userId, userMessage) {
     let username = users.get(userId) || 'unknown';
 
     // Detect name input safely
-    const nameMatch = userMessage.trim().match(/my name is ([\w\s]+)/i);
-    if (!users.get(userId) && nameMatch) {
-      username = nameMatch[1].trim();
+    const nameMatch = userMessage.match(/my name is ([\w\s]+)/i);
+    if (!users.get(userId) && nameMatch && nameMatch[1]) {
+      username = nameMatch[1];
       users.set(userId, username);
       return `Thank you ${username}. How can I support you today?`;
     }
@@ -45,7 +45,7 @@ Known user name: ${username}
 
 Instructions:
 ${SYSTEM_PROMPT}
-    `.trim();
+    `;
 
     const apiUrl = 'https://api.dreaded.site/api/chatgpt?text=' + encodeURIComponent(combinedText);
     console.log('📡 Sending request to:', apiUrl);
@@ -61,7 +61,7 @@ ${SYSTEM_PROMPT}
     const data = await response.json();
     console.log('📝 Full API response:', JSON.stringify(data, null, 2));
 
-    const aiReply = data?.result?.prompt?.trim();
+    const aiReply = data?.result?.prompt;
     console.log('✅ Extracted AI reply:', aiReply);
 
     if (aiReply) {
