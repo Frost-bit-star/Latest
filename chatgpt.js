@@ -14,44 +14,39 @@ Instructions:
 - Never dump long paragraphs. Never mention AI or system details. Always sound human, confident, and deeply helpful.
 `;
 
-const sessions = new Map(); // userId => { greeted: boolean, username: string }
+const users = new Map(); // userId -> username
 
 async function fetchStackVerifyAI(userId, userMessage) {
   const flirtyFallback = "🥺 Hang on… my brain is having a cute jam 🧠✨ Kindly visit https://stackverify.vercel.app for more details as I fix myself to impress you soon 💖";
 
   try {
-    // Get or initialize session
-    let session = sessions.get(userId) || { greeted: false, username: null };
+    // Get or initialize username
+    let username = users.get(userId) || 'unknown';
 
-    // Greet if needed
-    if (!session.greeted && /hi|hello|hey/i.test(userMessage.trim())) {
-      session.greeted = true;
-      sessions.set(userId, session);
-      return "Hi there 👋 What is your name?";
-    }
-
-    // Detect name
+    // Detect name input
     const nameMatch = userMessage.trim().match(/my name is ([\w\s]+)/i);
-    if (!session.username && nameMatch) {
-      session.username = nameMatch[1].trim();
-      sessions.set(userId, session);
-      return `Thank you ${session.username}. How can I support you today?`;
+    if (!users.get(userId) && nameMatch) {
+      username = nameMatch[1].trim();
+      users.set(userId, username);
+      return `Thank you ${username}. How can I support you today?`;
     }
 
-    // Compose input prompt
+    // Compose input with system prompt
     const combinedText = `
 User input:
 ${userMessage}
 
-Known user name: ${session.username || 'unknown'}
+Known user name: ${username}
 
 Instructions:
 ${SYSTEM_PROMPT}
     `.trim();
 
-    // Call API
-    const apiUrl = `https://api.dreaded.site/api/chatgpt?text=${encodeURIComponent(combinedText)}`;
-    const response = await fetch(apiUrl);
+    const apiUrl = 'https://api.dreaded.site/api/chatgpt?text=' + encodeURIComponent(combinedText);
+    console.log('📡 Sending request to:', apiUrl);
+
+    const response = await fetch(apiUrl, { method: 'GET' });
+    console.log('🔎 Response status:', response.status);
 
     if (!response.ok) {
       console.error('AI API error status:', response.status);
@@ -59,17 +54,20 @@ ${SYSTEM_PROMPT}
     }
 
     const data = await response.json();
+    console.log('📝 Full API response:', JSON.stringify(data, null, 2));
+
     const aiReply = data?.result?.prompt?.trim();
+    console.log('✅ Extracted AI reply:', aiReply);
 
     if (aiReply) {
       return aiReply;
     } else {
-      console.error('Invalid AI API response:', data);
+      console.error('❌ No valid aiReply found in data.');
       return flirtyFallback;
     }
 
   } catch (err) {
-    console.error('AI API fetch error:', err.message);
+    console.error('🔥 AI API fetch error:', err.message);
     return flirtyFallback;
   }
 }
