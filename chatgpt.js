@@ -4,20 +4,50 @@ const path = require('path');
 
 const db = new sqlite3.Database(path.join(__dirname, 'conversation.db'));
 
-// Create tables if not exist
-db.run(`CREATE TABLE IF NOT EXISTS conversations (
-  userId TEXT,
-  role TEXT,
-  content TEXT,
-  timestamp INTEGER
-)`);
+// Promisify DB helpers
+function dbGet(sql, params) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
 
-db.run(`CREATE TABLE IF NOT EXISTS session_flags (
-  userId TEXT,
-  date TEXT,
-  greeted INTEGER DEFAULT 0,
-  username TEXT
-)`);
+function dbAll(sql, params) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+}
+
+function dbRun(sql, params) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+}
+
+// Create tables if not exist
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS conversations (
+    userId TEXT,
+    role TEXT,
+    content TEXT,
+    timestamp INTEGER
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS session_flags (
+    userId TEXT,
+    date TEXT,
+    greeted INTEGER DEFAULT 0,
+    username TEXT
+  )`);
+});
 
 const SYSTEM_PROMPT = `
 You are StackVerify's trusted assistant with over 10 years of experience as an executive assistant and business professor.
@@ -42,40 +72,41 @@ async function fetchStackVerifyAI(userId, userMessage) {
     const today = new Date().toISOString().split('T')[0];
 
     // Check session flags
-    const session = await new Promise((resolve) => {
-      db.get(`SELECT greeted, username FROM session_flags WHERE userId = ? AND date = ?`, [userId, today], (err, row) => {
-        if (err) resolve({ greeted: false, username: null });
-        else resolve({ greeted: row?.greeted || 0, username: row?.username || null });
-      });
-    });
+    const session = await dbGet(`SELECT greeted, username FROM session_flags WHERE userId = ? AND date = ?`, [userId, today])
+      .catch(() => ({ greeted: 0, username: null })) || { greeted: 0, username: null };
 
-    // If greeting needed, mark as greeted and return greeting
+    // Greeting logic
     if (!session.greeted && /hi|hello|hey/i.test(userMessage.trim())) {
-      db.run(`INSERT OR REPLACE INTO session_flags (userId, date, greeted, username) VALUES (?, ?, 1, COALESCE(username, null))`, [userId, today]);
+      await dbRun(
+        `INSERT OR REPLACE INTO session_flags (userId, date, greeted, username) VALUES (?, ?, 1, ?)`,
+        [userId, today, session.username]
+      );
       return "Hi there 👋 What is your name?";
     }
 
-    // If name not known, detect possible name message
-    if (!session.username && /^my name is (\w+)/i.test(userMessage.trim())) {
-      const name = userMessage.trim().match(/^my name is (\w+)/i)[1];
-      db.run(`INSERT OR REPLACE INTO session_flags (userId, date, greeted, username) VALUES (?, ?, 1, ?)`, [userId, today, name]);
+    // Detect name input
+    const nameMatch = userMessage.trim().match(/my name is ([\w\s]+)/i);
+    if (!session.username && nameMatch) {
+      const name = nameMatch[1].trim();
+      await dbRun(
+        `INSERT OR REPLACE INTO session_flags (userId, date, greeted, username) VALUES (?, ?, 1, ?)`,
+        [userId, today, name]
+      );
       return `Thank you ${name}. How can I support you today?`;
     }
 
     // Store user message
-    db.run(`INSERT INTO conversations (userId, role, content, timestamp) VALUES (?, 'user', ?, ?)`, [userId, userMessage, Date.now()]);
+    await dbRun(`INSERT INTO conversations (userId, role, content, timestamp) VALUES (?, 'user', ?, ?)`, [userId, userMessage, Date.now()]);
 
-    // Determine trimming logic
+    // Determine history limit
     const needsTeaching = /(teach|explain|how|help|guide|steps|start|link|website|store|stackverify|trover)/i.test(userMessage);
     const historyLimit = needsTeaching ? MAX_HISTORY * 2 : Math.min(4, MAX_HISTORY);
 
     // Fetch conversation history
-    const conversationMemory = await new Promise((resolve, reject) => {
-      db.all(`SELECT role, content FROM conversations WHERE userId = ? ORDER BY timestamp DESC LIMIT ?`, [userId, historyLimit], (err, rows) => {
-        if (err) reject(err);
-        else resolve(rows.reverse());
-      });
-    });
+    const conversationMemory = await dbAll(
+      `SELECT role, content FROM conversations WHERE userId = ? ORDER BY timestamp DESC LIMIT ?`,
+      [userId, historyLimit]
+    );
 
     // Compose AI prompt input prioritising user input first
     const combinedText = `
@@ -85,17 +116,15 @@ ${userMessage}
 Known user name: ${session.username || 'unknown'}
 
 Conversation history:
-${conversationMemory.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}
+${conversationMemory.reverse().map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}
 
 Instructions:
 ${SYSTEM_PROMPT}
     `.trim();
 
-    // Use GET request for API
-    const encodedText = encodeURIComponent(combinedText);
-    const apiUrl = `https://api.dreaded.site/api/chatgpt?text=${encodedText}`;
-
-    const response = await fetch(apiUrl, { method: 'GET' });
+    // Make GET request
+    const apiUrl = `https://api.dreaded.site/api/chatgpt?text=${encodeURIComponent(combinedText)}`;
+    const response = await fetch(apiUrl);
 
     if (!response.ok) {
       console.error('AI API error status:', response.status);
@@ -103,22 +132,20 @@ ${SYSTEM_PROMPT}
     }
 
     const data = await response.json();
+    const aiReply = data?.result?.prompt?.trim();
 
-    if (data && data.result && data.result.prompt) {
-      const aiReply = data.result.prompt.trim();
-
+    if (aiReply) {
       // Store AI reply
-      db.run(`INSERT INTO conversations (userId, role, content, timestamp) VALUES (?, 'assistant', ?, ?)`, [userId, aiReply, Date.now()]);
+      await dbRun(`INSERT INTO conversations (userId, role, content, timestamp) VALUES (?, 'assistant', ?, ?)`, [userId, aiReply, Date.now()]);
 
       // Delete old messages if exceeding MAX_HISTORY * 2
-      db.get(`SELECT COUNT(*) as count FROM conversations WHERE userId = ?`, [userId], (err, row) => {
-        if (!err && row.count > MAX_HISTORY * 2) {
-          const deleteCount = row.count - (MAX_HISTORY * 2);
-          db.run(`DELETE FROM conversations WHERE userId = ? AND rowid IN (
-            SELECT rowid FROM conversations WHERE userId = ? ORDER BY timestamp ASC LIMIT ?
-          )`, [userId, userId, deleteCount]);
-        }
-      });
+      const countRow = await dbGet(`SELECT COUNT(*) as count FROM conversations WHERE userId = ?`, [userId]);
+      if (countRow.count > MAX_HISTORY * 2) {
+        const deleteCount = countRow.count - (MAX_HISTORY * 2);
+        await dbRun(`DELETE FROM conversations WHERE userId = ? AND rowid IN (
+          SELECT rowid FROM conversations WHERE userId = ? ORDER BY timestamp ASC LIMIT ?
+        )`, [userId, userId, deleteCount]);
+      }
 
       return aiReply;
     } else {
