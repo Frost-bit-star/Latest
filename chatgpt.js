@@ -1,3 +1,5 @@
+// fetchStackVerifyAI.js
+
 const fetch = require('node-fetch');
 
 const SYSTEM_PROMPT = `
@@ -20,10 +22,18 @@ async function fetchStackVerifyAI(userId, userMessage) {
   const flirtyFallback = "🥺 Hang on… my brain is having a cute jam 🧠✨ Kindly visit https://stackverify.vercel.app for more details as I fix myself to impress you soon 💖";
 
   try {
+    // Validate inputs
+    if (!userId || typeof userId !== 'string') {
+      console.error('❌ Invalid userId input:', userId);
+      return flirtyFallback;
+    }
+
     if (!userMessage || typeof userMessage !== 'string') {
       console.error('❌ Invalid userMessage input:', userMessage);
       return flirtyFallback;
     }
+
+    console.log('📥 Processing AI call with userId:', userId, 'userMessage:', userMessage);
 
     // Get or initialize username
     let username = users.get(userId) || 'unknown';
@@ -31,8 +41,9 @@ async function fetchStackVerifyAI(userId, userMessage) {
     // Detect name input safely
     const nameMatch = userMessage.match(/my name is ([\w\s]+)/i);
     if (!users.get(userId) && nameMatch && nameMatch[1]) {
-      username = nameMatch[1];
+      username = nameMatch[1].trim();
       users.set(userId, username);
+      console.log(`👤 New username saved for ${userId}: ${username}`);
       return `Thank you ${username}. How can I support you today?`;
     }
 
@@ -64,8 +75,8 @@ ${SYSTEM_PROMPT}
     const aiReply = data?.result?.prompt;
     console.log('✅ Extracted AI reply:', aiReply);
 
-    if (aiReply) {
-      return aiReply;
+    if (aiReply && typeof aiReply === 'string') {
+      return aiReply.trim();
     } else {
       console.error('❌ No valid aiReply found in data.');
       return flirtyFallback;
