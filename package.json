@@ -1,7 +1,7 @@
 {
   "name": "baileys-whatsapp-bot",
   "version": "1.1.0",
-  "description": "A WhatsApp bot using Baileys with OTP, self-message, AI fallback replies, bulk messaging, and GitHub backup sync.",
+  "description": "A WhatsApp bot using Baileys with OTP, self-message, bulk messaging, AI fallback replies, and GitHub backup sync.",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -14,20 +14,21 @@
     "express",
     "sqlite",
     "otp",
+    "bulk-message",
     "api",
     "git-backup",
     "ai",
     "chatgpt"
   ],
-  "author": "Your Name <you@example.com>",
+  "author": "morgan miller",
   "license": "MIT",
   "dependencies": {
     "@hapi/boom": "^10.0.0",
     "@whiskeysockets/baileys": "git+https://github.com/Fortunatusmokaya/Baileys.git",
     "chalk": "^4.1.2",
     "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
     "express": "^4.19.2",
-    "node-fetch": "^2.6.9",
     "pino": "^8.17.0",
     "sqlite3": "^5.1.7"
   },
