@@ -1,9 +1,9 @@
-require('dotenv').config();
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, getContentType, jidDecode } = require("@whiskeysockets/baileys");
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, proto, getContentType, jidDecode } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const { Boom } = require("@hapi/boom");
 const fs = require("fs");
 const path = require("path");
+const chalk = require("chalk");
 const express = require("express");
 const cors = require("cors");
 const sqlite3 = require("sqlite3").verbose();
@@ -21,43 +21,35 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const sessionName = "session";
 const backupPath = path.join(__dirname, "backup");
+
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO = "Frost-bit-star/Config";
+const REPO_URL = `https://${GITHUB_TOKEN}@github.com/${REPO}.git`;
 
-// === Repo 1: session backup ===
-const REPO1 = "Frost-bit-star/Config";
-const REPO1_URL = `https://${GITHUB_TOKEN}@github.com/${REPO1}.git`;
-
-// === Repo 2: stack.db storage ===
-const REPO2 = "Frost-bit-star/Storage-saas-paid";
-const REPO2_URL = `https://${GITHUB_TOKEN}@github.com/${REPO2}.git`;
-const REPO2_PATH = path.join(__dirname, "repo-data");
-const STACK_DB = path.join(REPO2_PATH, "stack.db");
-
-// === Clone or init Repo 2 ===
-if (!fs.existsSync(REPO2_PATH)) {
-  console.log("Cloning Storage-saas-paid repo...");
-  execSync(`git clone ${REPO2_URL} ${REPO2_PATH}`, { stdio: "inherit" });
-} else {
-  execSync('git pull', { cwd: REPO2_PATH });
-}
-
-// === Repo 1 session backup initialization ===
 if (!fs.existsSync(backupPath)) {
   console.log("Creating backup directory...");
   fs.mkdirSync(backupPath, { recursive: true });
 }
+
 if (!fs.existsSync(path.join(backupPath, ".git"))) {
-  console.log("Cloning Config repo...");
-  execSync(`git clone ${REPO1_URL} ${backupPath}`, { stdio: "inherit" });
+  console.log("Cloning backup repo...");
+  try {
+    execSync(`git clone ${REPO_URL} ${backupPath}`, { stdio: "inherit" });
+  } catch (err) {
+    console.error("Git clone failed:", err.message);
+  }
 }
+
 (async () => {
   try {
     await gitPull();
-    console.log("✅ Pulled latest session backup before server start.");
+    console.log("✅ Pulled latest backup before server start.");
   } catch (e) {
     console.error("Git pull failed on startup:", e);
   }
 })();
+
+const color = (text, c) => (chalk[c] ? chalk[c](text) : chalk.green(text));
 
 async function initializeSession() {
   const credsPath = path.join(__dirname, "session", "creds.json");
@@ -73,155 +65,18 @@ async function initializeSession() {
   }
 }
 
-// === SQLite DB initialization (stack.db from Repo 2) ===
-const db = new sqlite3.Database(STACK_DB, err => {
-  if (err) console.error("❌ stack.db load error:", err);
-  else console.log("✅ stack.db loaded");
+const db = new sqlite3.Database(path.join(__dirname, "data.db"));
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS verification_codes (phone TEXT, code TEXT, created_at INTEGER)`);
 });
-db.run(`CREATE TABLE IF NOT EXISTS apikeys (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  company TEXT,
-  email TEXT,
-  password TEXT,
-  apikey TEXT UNIQUE,
-  status TEXT CHECK(status IN ('paid','unpaid')) DEFAULT 'unpaid'
-)`);
-db.run(`CREATE TABLE IF NOT EXISTS verification_codes (
-  phone TEXT,
-  code TEXT,
-  created_at INTEGER
-)`);
 
-// === Validate API key as paid ===
-function validateApiKey(req, res, next) {
+// Dummy API key checker middleware
+function checkDummyApiKey(req, res, next) {
   const apiKey = req.headers["x-api-key"];
-  if (!apiKey) return res.status(401).json({ error: "API key required" });
-  db.get("SELECT * FROM apikeys WHERE apikey = ?", [apiKey], (err, row) => {
-    if (err) return res.status(500).json({ error: "DB error" });
-    if (!row) return res.status(403).json({ error: "Invalid API key" });
-    if (row.status !== 'paid') return res.status(402).json({ error: "Upgrade to paid plan" });
-    req.user = row;
-    next();
-  });
-}
-
-async function startBot() {
-  await initializeSession();
-  const { state, saveCreds } = await useMultiFileAuthState(`./${sessionName}`);
-  console.log("Connecting to WhatsApp...");
-
-  const client = makeWASocket({
-    logger: pino({ level: "silent" }),
-    browser: ["Bot", "Chrome", "1.0.0"],
-    auth: state,
-  });
-
-  client.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) console.log("📱 Scan this QR code to connect:\n", qr);
-    if (connection === "close") {
-      const reason = new Boom(lastDisconnect?.error)?.output.statusCode;
-      if ([DisconnectReason.badSession, DisconnectReason.connectionReplaced, DisconnectReason.loggedOut].includes(reason)) process.exit();
-      else startBot();
-    } else if (connection === "open") {
-      console.log("✅ Bot connected successfully!");
-      await client.sendMessage(client.user.id, { text: "Hello, your bot is connected and running!" });
-    }
-  });
-
-  client.ev.on("creds.update", saveCreds);
-
-  client.ev.on("messages.upsert", async (chatUpdate) => {
-    try {
-      const mek = chatUpdate.messages[0];
-      if (!mek.message || mek.key.fromMe) return;
-      const m = smsg(client, mek);
-      const text = m.body?.toLowerCase() || "";
-
-      if (text === ".ping") {
-        await client.sendMessage(m.chat, { text: "✅ Bot is online." });
-        return;
-      }
-
-      const aiReply = await fetchStackVerifyAI(m.sender, m.body);
-      await client.sendMessage(m.chat, { text: aiReply });
-
-    } catch (err) {
-      console.log("❌ Message error:", err);
-    }
-  });
-
-  // === OTP endpoints ===
-  app.post("/request-code", async (req, res) => {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ message: "Phone required" });
-    const code = crypto.randomInt(1000, 9999).toString();
-    const createdAt = Date.now();
-    db.run(`INSERT INTO verification_codes (phone, code, created_at) VALUES (?, ?, ?)`, [phone, code, createdAt]);
-    try {
-      await client.sendMessage(`${phone}@s.whatsapp.net`, { text: `${code} is your verification code.` });
-      res.json({ message: "OTP sent" });
-    } catch {
-      res.status(500).json({ message: "Failed to send OTP" });
-    }
-  });
-
-  app.post("/verify-code", (req, res) => {
-    const { phone, code } = req.body;
-    const expiry = Date.now() - 5 * 60 * 1000;
-    db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
-      if (row) res.json({ valid: true });
-      else res.status(400).json({ valid: false });
-    });
-  });
-
-  // === Self message ===
-  app.post("/self-message", validateApiKey, async (req, res) => {
-    const { number, message } = req.body;
-    if (!number || !message) return res.status(400).json({ error: "Number and message required" });
-    try {
-      await client.sendMessage(`${number}@s.whatsapp.net`, { text: `From ${req.user.company}: ${message}` });
-      res.json({ sent: true });
-    } catch (err) {
-      res.status(500).json({ error: "Failed to send message" });
-    }
-  });
-
-  // === Bulk message ===
-  app.post("/bulk-message", validateApiKey, async (req, res) => {
-    const { numbers, template } = req.body;
-    if (!numbers || !Array.isArray(numbers) || numbers.length === 0 || !template) {
-      return res.status(400).json({ error: "Numbers (array) and template required" });
-    }
-    const results = [];
-    for (const number of numbers) {
-      try {
-        const message = template.replace("{number}", number).replace("{sender}", req.user.company);
-        await client.sendMessage(`${number}@s.whatsapp.net`, { text: message });
-        results.push({ number, status: "sent" });
-      } catch (err) {
-        console.error(`Failed to send to ${number}:`, err);
-        results.push({ number, status: "failed", error: err.message });
-      }
-    }
-    res.json({ results });
-  });
-
-  app.get("/", (req, res) => {
-    res.send("Baileys WhatsApp Bot with OTP, Self Message, Bulk Message, AI replies, and Stack DB Paid API management is running!");
-  });
-
-  app.listen(PORT, () => {
-    console.log(`Express server running on port ${PORT}`);
-  });
-
-  // === Periodic backup for both repos ===
-  gitInit();
-  setInterval(() => {
-    copyFiles();
-    gitPush(); // for session backup (repo 1)
-    execSync('git add . && git commit -m "Auto backup" && git push', { cwd: REPO2_PATH }); // for stack.db backup (repo 2)
-  }, 2 * 60 * 1000);
+  if (!apiKey) {
+    return res.status(401).json({ error: "API key required in x-api-key header" });
+  }
+  next();
 }
 
 function smsg(conn, m) {
@@ -245,6 +100,133 @@ function smsg(conn, m) {
   m.reply = (text, chatId = m.chat, options = {}) =>
     conn.sendMessage(chatId, { text, ...options }, { quoted: m });
   return m;
+}
+
+async function startBot() {
+  await initializeSession();
+  const { state, saveCreds } = await useMultiFileAuthState(`./${sessionName}`);
+  console.log("Connecting to WhatsApp...");
+
+  const client = makeWASocket({
+    logger: pino({ level: "silent" }),
+    browser: ["Bot", "Chrome", "1.0.0"],
+    auth: state,
+  });
+
+  client.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log("📱 Scan this QR code to connect:\n");
+      console.log(qr);
+    }
+
+    if (connection === "close") {
+      const reason = new Boom(lastDisconnect?.error)?.output.statusCode;
+      if (reason === DisconnectReason.badSession) process.exit();
+      else if ([DisconnectReason.connectionClosed, DisconnectReason.connectionLost, DisconnectReason.restartRequired, DisconnectReason.timedOut].includes(reason)) startBot();
+      else if ([DisconnectReason.connectionReplaced, DisconnectReason.loggedOut].includes(reason)) process.exit();
+      else startBot();
+    } else if (connection === "open") {
+      console.log(color("✅ Bot connected successfully!", "green"));
+      await client.sendMessage(client.user.id, { text: "Hello, your bot is connected and running!" });
+    }
+  });
+
+  client.ev.on("creds.update", saveCreds);
+
+  client.ev.on("messages.upsert", async (chatUpdate) => {
+    try {
+      const mek = chatUpdate.messages[0];
+      if (!mek.message || mek.key.fromMe) return;
+      const m = smsg(client, mek);
+      const senderNum = m.key.remoteJid.split("@")[0];
+      const text = m.body?.toLowerCase() || "";
+
+      // Bot ping check
+      if (text === ".ping") {
+        await client.sendMessage(m.chat, { text: "✅ Bot is online with pairing code session." });
+        return;
+      }
+
+      // AI assistant reply
+      const aiReply = await fetchStackVerifyAI(senderNum, m.body);
+      await client.sendMessage(m.chat, { text: aiReply });
+
+    } catch (err) {
+      console.log("❌ Message error:", err);
+    }
+  });
+
+  // OTP endpoints
+  app.post("/request-code", async (req, res) => {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ message: "Phone required" });
+    const code = crypto.randomInt(1000, 9999).toString();
+    const createdAt = Date.now();
+    db.run(`INSERT INTO verification_codes (phone, code, created_at) VALUES (?, ?, ?)`, [phone, code, createdAt]);
+    try {
+      await client.sendMessage(`${phone}@s.whatsapp.net`, { text: `${code} is your verification code.` });
+      res.json({ message: "OTP sent" });
+    } catch {
+      res.status(500).json({ message: "Failed to send OTP" });
+    }
+  });
+
+  app.post("/verify-code", (req, res) => {
+    const { phone, code } = req.body;
+    const expiry = Date.now() - 5 * 60 * 1000;
+    db.get(`SELECT * FROM verification_codes WHERE phone = ? AND code = ? AND created_at > ?`, [phone, code, expiry], (err, row) => {
+      if (row) res.json({ valid: true });
+      else res.status(400).json({ valid: false });
+    });
+  });
+
+  // Self message endpoint
+  app.post("/self-message", checkDummyApiKey, async (req, res) => {
+    const { number, message } = req.body;
+    if (!number || !message) return res.status(400).json({ error: "Number and message required" });
+    try {
+      await client.sendMessage(`${number}@s.whatsapp.net`, { text: message });
+      res.json({ sent: true });
+    } catch (err) {
+      res.status(500).json({ error: "Failed to send message" });
+    }
+  });
+
+  // Bulk message endpoint
+  app.post("/bulk-message", checkDummyApiKey, async (req, res) => {
+    const { numbers, template } = req.body;
+    if (!numbers || !Array.isArray(numbers) || numbers.length === 0 || !template) {
+      return res.status(400).json({ error: "Numbers (array) and template required" });
+    }
+    const results = [];
+    for (const number of numbers) {
+      try {
+        const message = template.replace("{number}", number);
+        await client.sendMessage(`${number}@s.whatsapp.net`, { text: message });
+        results.push({ number, status: "sent" });
+      } catch (err) {
+        console.error(`Failed to send to ${number}:`, err);
+        results.push({ number, status: "failed", error: err.message });
+      }
+    }
+    res.json({ results });
+  });
+
+  app.get("/", (req, res) => {
+    res.send("Baileys WhatsApp Bot is running!");
+  });
+
+  app.listen(PORT, () => {
+    console.log(`Express server running on port ${PORT}`);
+  });
+
+  gitInit();
+  setInterval(() => {
+    copyFiles();
+    gitPush();
+  }, 2 * 60 * 1000);
 }
 
 startBot();
