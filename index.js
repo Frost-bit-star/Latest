@@ -1,5 +1,3 @@
-// index.js
-
 require('dotenv').config();
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, getContentType, jidDecode } = require("@whiskeysockets/baileys");
 const pino = require("pino");
@@ -23,7 +21,6 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const sessionName = "session";
 const backupPath = path.join(__dirname, "backup");
-
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 // === Repo 1: session backup ===
@@ -76,7 +73,7 @@ async function initializeSession() {
   }
 }
 
-// === SQLite DB initialization ===
+// === SQLite DB initialization (stack.db from Repo 2) ===
 const db = new sqlite3.Database(STACK_DB, err => {
   if (err) console.error("❌ stack.db load error:", err);
   else console.log("✅ stack.db loaded");
@@ -218,11 +215,12 @@ async function startBot() {
     console.log(`Express server running on port ${PORT}`);
   });
 
+  // === Periodic backup for both repos ===
   gitInit();
   setInterval(() => {
     copyFiles();
-    gitPush();
-    execSync('git add . && git commit -m "Auto backup" && git push', { cwd: REPO2_PATH });
+    gitPush(); // for session backup (repo 1)
+    execSync('git add . && git commit -m "Auto backup" && git push', { cwd: REPO2_PATH }); // for stack.db backup (repo 2)
   }, 2 * 60 * 1000);
 }
 
